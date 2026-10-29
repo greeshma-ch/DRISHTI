@@ -145,9 +145,14 @@ Environment variables (names only): `MODEL_API_KEY`, `META_BASE_URL` (default
 Works on the demo phone outdoors; respects the arbiter priorities; has a spoken failure mode; spend
 is logged; documented in PROGRESS.md.
 
+## META API
+Meta API: reasoning_effort must be minimal (lowest supported). max_tokens includes reasoning; use about 400 to 500. Enforce the schema enums with a JSON schema if supported, otherwise validate and map unknown types to other. Typical latency is 2.8 s per frame. Never use the default reasoning effort (9 s).
+
 ## Do not
 
 - Add features outside the scope in PROGRESS.md without noting a trade-off.
 - Add place recommendations, fall detection, or native glasses support unless PROGRESS.md says the
   core is stable (they are stretch or roadmap).
 - Let free-form LLM text interrupt or replace a P1 hazard alert.
+
+
