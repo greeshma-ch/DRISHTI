@@ -21,19 +21,17 @@ emergency flow, personalization (Hindi and English, tone, verbosity, steps), eva
 - [ ] Telegram bot created; token saved to `.env`
 - [ ] Chest strap or lanyard mount found; 2 filming routes planned
 
-## Day plan
+## Compressed schedule (IST, restarted Oct 29)
 
-| Day | Date | Goal | Status |
+| Date | Prompts | Goal | Status |
 |---|---|---|---|
-| D1 | Oct 27 | End-to-end skeleton: camera -> server -> Spark -> spoken sentence; validate Day 1 checks; film 5 clips | [ ] |
-| D2 | Oct 28 | Tier 1 detector, Tier 2 structured hazards, arbiter v1 (priority, dedupe, TTL), spend guard | [ ] |
-| D3 | Oct 29 | Navigation: geocode, route, cues, off-route; fuse with hazards via arbiter | [ ] |
-| D4 | Oct 30 | Emergency flow, profile and voice onboarding, Hindi phrase table, language and tone switching | [ ] |
-| D5 | Oct 31 | Film remaining clips, label, eval harness, first numbers. Gate: walk to a destination outdoors with live alerts | [ ] |
-| D6 | Nov 1 | Tune thresholds from eval, SAM corridor, cut false alarms; Hindi phrase review with a fluent speaker | [ ] |
-| D7 | Nov 2 | Stretch (nearby query) and UX polish: one-tap interface, vibration patterns, graceful degradation | [ ] |
-| D8 | Nov 3 | Feature freeze; field test 2 routes; record demo footage; README and architecture diagram | [ ] |
-| D9 | Nov 4 | Final edit, upload, submit by 6:00 PM IST | [ ] |
+| Oct 29 (today) | Setup, P0, P1, P2 | Bootstrap, walking skeleton (camera -> server -> Meta -> speech), arbiter v1 & phrase table | [x] P0 done |
+| Oct 30 | P3, P4 | Tier 1 on-device detector, Tier 2 hardening, rate limiter, spend guard | [ ] |
+| Oct 31 | P5, P6, P5b | Navigation, emergency flow, profile & onboarding, "what's nearby" | [ ] |
+| Nov 1 | P7 | Evaluation harness. Gate: walk outdoors with live alerts; SAM decision | [ ] |
+| Nov 2 | P8, P9a | Reliability hardening, soak test, memory & semantic search (if gate passed) | [ ] |
+| Nov 3 | P9-lite, freeze | Accessible UI, saved places, feature freeze, film demo footage | [ ] |
+| Nov 4 | Submit | Demo edit, README, architecture diagram, submit by 6:00 PM IST | [ ] |
 
 ## Credit budget ($150 cap, Meta Model API)
 
@@ -71,10 +69,14 @@ Throttle levels are defined in AGENTS.md (warn $60, throttle $90, block dev call
 
 ## Current session
 
-- Working on:
+- Working on: P0 Repo bootstrap
 - Done this session:
-- Next:
-- Blockers:
+  - Repository structure created: apps/web, server, eval, shared
+  - Server: /health and /spend endpoints, pydantic-settings reading .env, pytest, ruff, mypy passing
+  - Web: React 19 + Vite + TypeScript strict, vitest, fast-check, eslint passing, placeholder UI
+  - shared/phrases.json, .env.example, .gitignore, Makefile, GitHub Actions CI, README.md
+- Next: P1 Walking skeleton (camera to server to Meta to speech)
+- Blockers: None
 
 ## Open issues and risks
 

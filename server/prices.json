@@ -1,0 +1,11 @@
+{
+  "muse-spark-1.3": {
+    "input_per_1k_tokens": 0.0018,
+    "output_per_1k_tokens": 0.0072,
+    "per_image": 0.0015
+  },
+  "sam-3.1": {
+    "per_image": 0.0025
+  },
+  "_note": "Verify these against the Meta pricing page on Day 1"
+}

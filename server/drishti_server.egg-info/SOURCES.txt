@@ -1,0 +1,7 @@
+pyproject.toml
+drishti_server.egg-info/PKG-INFO
+drishti_server.egg-info/SOURCES.txt
+drishti_server.egg-info/dependency_links.txt
+drishti_server.egg-info/requires.txt
+drishti_server.egg-info/top_level.txt
+tests/test_app.py
