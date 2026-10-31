@@ -119,6 +119,9 @@ contact), distance-to-hazard at alert time, false alarms per minute, direction a
 p50 and p95, plus navigation route completion. Ablations: Tier 1 only vs Tier 2 only vs both; SAM
 corridor on vs off; arbiter on vs speak-everything. Ablations reuse cached model outputs where possible.
 
+
+Tier 2 runs with 1 in-flight request. Output is the single most urgent hazard only. Latency to be re-measured after the max_tokens fix.
+
 ## Stack and layout
 
 ```
@@ -147,6 +150,7 @@ is logged; documented in PROGRESS.md.
 
 ## META API
 Meta API: reasoning_effort must be minimal (lowest supported). max_tokens includes reasoning; use about 400 to 500. Enforce the schema enums with a JSON schema if supported, otherwise validate and map unknown types to other. Typical latency is 2.8 s per frame. Never use the default reasoning effort (9 s).
+
 
 ## Do not
 

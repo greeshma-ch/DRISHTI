@@ -146,6 +146,10 @@ cancelled, sent. Use the table from the spec doc as the starting point. Keep urg
 Add a /demo page with buttons that fire a message of each priority so I can hear interruptions in Hindi.
 Use fast-check property tests: a P1 is never delayed by a P3; speech never overlaps; expired messages never
 speak; dedupe and rate limit hold under random message streams.
+Client-side watchdog: count fetch failures and timeouts on the client, not the server. After 2 consecutive
+failures, or 4 s with no response, speak "Vision limited"; repeat every 15 s while it lasts; speak "Vision back"
+on recovery. Use the pre-rendered audio clips for these phrases so they work offline. Prefer voices with
+localService true, and never rely on a network voice for a safety phrase.
 
 Acceptance: all tests pass; on the phone, firing P3 then P1 cuts the P3 mid-sentence.
 ```

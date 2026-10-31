@@ -25,7 +25,7 @@ emergency flow, personalization (Hindi and English, tone, verbosity, steps), eva
 
 | Date | Prompts | Goal | Status |
 |---|---|---|---|
-| Oct 29 (today) | Setup, P0, P1, P2 | Bootstrap, walking skeleton (camera -> server -> Meta -> speech), arbiter v1 & phrase table | [x] P0 done |
+| Oct 29 (today) | Setup, P0, P1, P2 | Bootstrap, walking skeleton (camera -> server -> Meta -> speech), arbiter v1 & phrase table | [x] P0, P1 done |
 | Oct 30 | P3, P4 | Tier 1 on-device detector, Tier 2 hardening, rate limiter, spend guard | [ ] |
 | Oct 31 | P5, P6, P5b | Navigation, emergency flow, profile & onboarding, "what's nearby" | [ ] |
 | Nov 1 | P7 | Evaluation harness. Gate: walk outdoors with live alerts; SAM decision | [ ] |
@@ -56,7 +56,7 @@ Throttle levels are defined in AGENTS.md (warn $60, throttle $90, block dev call
 
 | Date | Activity | Calls | Est. cost | Running total |
 |---|---|---|---|---|
-| | | | | |
+| Oct 31 | P1 live verification + in-flight benchmark (40 frames) | ~200 | $0.62 | $0.62 |
 
 ## Decision log
 
@@ -66,16 +66,29 @@ Throttle levels are defined in AGENTS.md (warn $60, throttle $90, block dev call
 | Oct 26 | Demo languages: Hindi and English | Chosen by builder |
 | Oct 26 | Urgent alerts use a fixed phrase table, not free LLM text | Latency, predictability, Hindi grammar control |
 | Oct 26 | Tier 2 at about 0.5 fps by default, adaptive up to 1 fps | Credit cap |
+| Oct 31 | Output tokens cut to 150; single most urgent hazard returned | Cut Meta latency to median 1.84s (from 2.8s) |
+| Oct 31 | Tier 2 max_tokens raised to 450 with retry at 700; never speak "path clear" | Fix safety bug: reasoning tokens hit cutoff causing false "path clear" |
+| Oct 31 | Specific hazard phrase table restored without free-text generation | 18 hazard types, clear_side avoidance action, label for other, <= 4 words |
 
 ## Current session
 
-- Working on: P0 Repo bootstrap
+- Working on: Specific spoken hazards without free-text generation (expanded enums, clear_side, label for other, phrase tables)
 - Done this session:
-  - Repository structure created: apps/web, server, eval, shared
-  - Server: /health and /spend endpoints, pydantic-settings reading .env, pytest, ruff, mypy passing
-  - Web: React 19 + Vite + TypeScript strict, vitest, fast-check, eslint passing, placeholder UI
-  - shared/phrases.json, .env.example, .gitignore, Makefile, GitHub Actions CI, README.md
-- Next: P1 Walking skeleton (camera to server to Meta to speech)
+  - `server/phrases.py` & `apps/web/src/phrases.ts`:
+    - Fixed phrase table and deterministic phrase builder for hi and en.
+    - 18 hazard types: chair, table, bench, door, wall, pole, tree_branch, vehicle, rickshaw, bicycle, person, animal, stairs, step_down, pothole, open_drain, construction, other.
+    - Direction + avoid action from `clear_side` (left/right/none), <= 4 words (e.g. chair center, clear_side right -> "कुर्सी आगे, दाएँ हटें" / "Chair ahead, step right").
+    - "other" with label speaks "{label} आगे" / "{label} ahead"; falls back to generic "खतरा" / "Hazard" only when label missing.
+    - Hard Rule 1 enforced: returns `""` when no hazard; never speaks "path clear".
+  - `server/meta_client.py`:
+    - `Hazard` schema updated with `clear_side: "left"|"right"|"none"` and `label` (max 2 words if other).
+    - `SYSTEM_PROMPT` updated with expanded enums without free-text generation.
+  - `apps/web/src/App.tsx`:
+    - Updated `HazardItem` interface; imports `buildPhrase` from `phrases.ts`.
+  - `server/tests/test_frame.py` (24 passing tests) & `apps/web/src/App.test.tsx` (6 passing tests):
+    - Verified chair center specific phrases with and without clear_side in hi and en.
+    - Verified "other" with label, "other" without label, and never "path clear".
+- Next: P2 Priority arbiter and queuing
 - Blockers: None
 
 ## Open issues and risks
