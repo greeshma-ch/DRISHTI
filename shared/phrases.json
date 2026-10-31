@@ -1,10 +1,38 @@
 {
-  "en": {
-    "hazards": {},
-    "system": {}
+  "nouns": {
+    "chair": { "en": "Chair", "hi": "कुर्सी" },
+    "table": { "en": "Table", "hi": "मेज़" },
+    "bench": { "en": "Bench", "hi": "बेंच" },
+    "door": { "en": "Door", "hi": "दरवाज़ा" },
+    "wall": { "en": "Wall", "hi": "दीवार" },
+    "pole": { "en": "Pole", "hi": "खंभा" },
+    "tree_branch": { "en": "Branch", "hi": "टहनी" },
+    "vehicle": { "en": "Vehicle", "hi": "गाड़ी" },
+    "rickshaw": { "en": "Rickshaw", "hi": "रिक्शा" },
+    "bicycle": { "en": "Bicycle", "hi": "साइकिल" },
+    "person": { "en": "Person", "hi": "व्यक्ति" },
+    "animal": { "en": "Animal", "hi": "जानवर" },
+    "stairs": { "en": "Stairs", "hi": "सीढ़ियां" },
+    "step_down": { "en": "Step down", "hi": "सीढ़ी" },
+    "pothole": { "en": "Pothole", "hi": "गड्ढा" },
+    "open_drain": { "en": "Drain", "hi": "नाला" },
+    "construction": { "en": "Construction", "hi": "निर्माण" },
+    "other": { "en": "Hazard", "hi": "खतरा" }
   },
-  "hi": {
-    "hazards": {},
-    "system": {}
+  "directions": {
+    "center": { "en": "ahead", "hi": "आगे" },
+    "left": { "en": "left", "hi": "बाएँ" },
+    "right": { "en": "right", "hi": "दाएँ" }
+  },
+  "avoid_actions": {
+    "right": { "en": "step right", "hi": "दाएँ हटें" },
+    "left": { "en": "step left", "hi": "बाएँ हटें" }
+  },
+  "system_messages": {
+    "vision_paused": { "en": "Vision paused", "hi": "दृष्टि रुकी" },
+    "vision_back": { "en": "Vision back", "hi": "दृष्टि वापस" },
+    "vision_limited": { "en": "Vision limited", "hi": "दृष्टि सीमित" },
+    "emergency_triggered": { "en": "Emergency triggered", "hi": "आपातकाल शुरू" },
+    "emergency_cancelled": { "en": "Emergency cancelled", "hi": "आपातकाल रद्द" }
   }
 }

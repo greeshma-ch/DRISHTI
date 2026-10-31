@@ -1,34 +1,41 @@
-export const NOUNS: Record<string, { en: string; hi: string }> = {
-  chair: { en: "Chair", hi: "कुर्सी" },
-  table: { en: "Table", hi: "मेज़" },
-  bench: { en: "Bench", hi: "बेंच" },
-  door: { en: "Door", hi: "दरवाज़ा" },
-  wall: { en: "Wall", hi: "दीवार" },
-  pole: { en: "Pole", hi: "खंभा" },
-  tree_branch: { en: "Branch", hi: "टहनी" },
-  vehicle: { en: "Vehicle", hi: "गाड़ी" },
-  rickshaw: { en: "Rickshaw", hi: "रिक्शा" },
-  bicycle: { en: "Bicycle", hi: "साइकिल" },
-  person: { en: "Person", hi: "व्यक्ति" },
-  animal: { en: "Animal", hi: "जानवर" },
-  stairs: { en: "Stairs", hi: "सीढ़ियां" },
-  step_down: { en: "Step down", hi: "सीढ़ी" },
-  pothole: { en: "Pothole", hi: "गड्ढा" },
-  open_drain: { en: "Drain", hi: "नाला" },
-  construction: { en: "Construction", hi: "निर्माण" },
-  other: { en: "Hazard", hi: "खतरा" },
-};
+// Phrase table loaded from shared/phrases.json — single source of truth for client & server
+import phrasesJson from "@shared/phrases.json";
 
-export const DIRECTIONS: Record<string, { en: string; hi: string }> = {
-  center: { en: "ahead", hi: "आगे" },
-  left: { en: "left", hi: "बाएँ" },
-  right: { en: "right", hi: "दाएँ" },
-};
+// Type definitions matching the JSON structure
+export interface PhraseNoun {
+  en: string;
+  hi: string;
+}
 
-export const AVOID_ACTIONS: Record<string, { en: string; hi: string }> = {
-  right: { en: "step right", hi: "दाएँ हटें" },
-  left: { en: "step left", hi: "बाएँ हटें" },
-};
+export interface PhraseDirection {
+  en: string;
+  hi: string;
+}
+
+export interface PhraseAvoidAction {
+  en: string;
+  hi: string;
+}
+
+export interface SystemMessage {
+  en: string;
+  hi: string;
+}
+
+export interface PhraseTables {
+  nouns: Record<string, PhraseNoun>;
+  directions: Record<string, PhraseDirection>;
+  avoid_actions: Record<string, PhraseAvoidAction>;
+  system_messages: Record<string, SystemMessage>;
+}
+
+// Load from shared JSON
+const PHRASES: PhraseTables = phrasesJson as PhraseTables;
+
+export const NOUNS = PHRASES.nouns;
+export const DIRECTIONS = PHRASES.directions;
+export const AVOID_ACTIONS = PHRASES.avoid_actions;
+export const SYSTEM_MESSAGES = PHRASES.system_messages;
 
 export const buildPhrase = (
   hazard: {
@@ -83,3 +90,9 @@ export const buildPhrase = (
   return words.slice(0, 4).join(" ");
 };
 
+// Helper to get system messages in the current language
+export const getSystemMessage = (key: string, language: "en" | "hi"): string => {
+  const msg = SYSTEM_MESSAGES[key];
+  if (!msg) return "";
+  return language === "hi" ? msg.hi : msg.en;
+};

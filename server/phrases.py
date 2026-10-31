@@ -6,37 +6,19 @@ All phrases are 4 words or fewer: action + direction or detection + avoid action
 
 from __future__ import annotations
 
-NOUNS: dict[str, dict[str, str]] = {
-    "chair": {"en": "Chair", "hi": "कुर्सी"},
-    "table": {"en": "Table", "hi": "मेज़"},
-    "bench": {"en": "Bench", "hi": "बेंच"},
-    "door": {"en": "Door", "hi": "दरवाज़ा"},
-    "wall": {"en": "Wall", "hi": "दीवार"},
-    "pole": {"en": "Pole", "hi": "खंभा"},
-    "tree_branch": {"en": "Branch", "hi": "टहनी"},
-    "vehicle": {"en": "Vehicle", "hi": "गाड़ी"},
-    "rickshaw": {"en": "Rickshaw", "hi": "रिक्शा"},
-    "bicycle": {"en": "Bicycle", "hi": "साइकिल"},
-    "person": {"en": "Person", "hi": "व्यक्ति"},
-    "animal": {"en": "Animal", "hi": "जानवर"},
-    "stairs": {"en": "Stairs", "hi": "सीढ़ियां"},
-    "step_down": {"en": "Step down", "hi": "सीढ़ी"},
-    "pothole": {"en": "Pothole", "hi": "गड्ढा"},
-    "open_drain": {"en": "Drain", "hi": "नाला"},
-    "construction": {"en": "Construction", "hi": "निर्माण"},
-    "other": {"en": "Hazard", "hi": "खतरा"},
-}
+import json
+from pathlib import Path
 
-DIRECTIONS: dict[str, dict[str, str]] = {
-    "center": {"en": "ahead", "hi": "आगे"},
-    "left": {"en": "left", "hi": "बाएँ"},
-    "right": {"en": "right", "hi": "दाएँ"},
-}
+# Load phrase tables from shared/phrases.json (single source of truth)
+_SHARED_PHRASES_PATH = Path(__file__).parent.parent / "shared" / "phrases.json"
 
-AVOID_ACTIONS: dict[str, dict[str, str]] = {
-    "right": {"en": "step right", "hi": "दाएँ हटें"},
-    "left": {"en": "step left", "hi": "बाएँ हटें"},
-}
+with _SHARED_PHRASES_PATH.open("r", encoding="utf-8") as f:
+    _PHRASES = json.load(f)
+
+NOUNS: dict[str, dict[str, str]] = _PHRASES["nouns"]
+DIRECTIONS: dict[str, dict[str, str]] = _PHRASES["directions"]
+AVOID_ACTIONS: dict[str, dict[str, str]] = _PHRASES["avoid_actions"]
+SYSTEM_MESSAGES: dict[str, dict[str, str]] = _PHRASES["system_messages"]
 
 
 def build_phrase(
@@ -85,3 +67,12 @@ def build_phrase(
     base = f"{noun} {dir_word}"
     words = base.split()
     return " ".join(words[:4])
+
+
+def get_system_message(key: str, lang: str = "en") -> str:
+    """Get a system message (vision_paused, vision_back, vision_limited, etc.) in the given language."""
+    msg = SYSTEM_MESSAGES.get(key)
+    if not msg:
+        return ""
+    lang_code = "hi" if str(lang).lower().startswith("hi") else "en"
+    return msg[lang_code]

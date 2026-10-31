@@ -26,8 +26,8 @@ emergency flow, personalization (Hindi and English, tone, verbosity, steps), eva
 | Date | Prompts | Goal | Status |
 |---|---|---|---|
 | Oct 29 (today) | Setup, P0, P1, P2 | Bootstrap, walking skeleton (camera -> server -> Meta -> speech), arbiter v1 & phrase table | [x] P0, P1 done |
-| Oct 30 | P3, P4 | Tier 1 on-device detector, Tier 2 hardening, rate limiter, spend guard | [ ] |
-| Oct 31 | P5, P6, P5b | Navigation, emergency flow, profile & onboarding, "what's nearby" | [ ] |
+| Oct 30 | P3, P4 | P3: Tier 1 on-device detector; P4: Tier 2 hardening, rate limiter, spend guard | [ ] |
+| Oct 31 | P5, P6 | P5: Navigation; P6: Emergency flow, profile & onboarding, "what's nearby" | [ ] |
 | Nov 1 | P7 | Evaluation harness. Gate: walk outdoors with live alerts; SAM decision | [ ] |
 | Nov 2 | P8, P9a | Reliability hardening, soak test, memory & semantic search (if gate passed) | [ ] |
 | Nov 3 | P9-lite, freeze | Accessible UI, saved places, feature freeze, film demo footage | [ ] |
@@ -72,23 +72,79 @@ Throttle levels are defined in AGENTS.md (warn $60, throttle $90, block dev call
 
 ## Current session
 
-- Working on: Specific spoken hazards without free-text generation (expanded enums, clear_side, label for other, phrase tables)
+- Working on: P2 Priority arbiter and queuing (COMPLETED), Task 5 Client watchdog (COMPLETED), Task 6 Shared phrases (COMPLETED), Task 7 Audio clips (COMPLETED), Task 8 Soft tick (COMPLETED), Task 9 Demo page (COMPLETED), Task 10 Property tests (COMPLETED), Task 11 Phase numbering fix (COMPLETED), Task 12 Refined P1 rate-limit policy (COMPLETED)
 - Done this session:
-  - `server/phrases.py` & `apps/web/src/phrases.ts`:
-    - Fixed phrase table and deterministic phrase builder for hi and en.
-    - 18 hazard types: chair, table, bench, door, wall, pole, tree_branch, vehicle, rickshaw, bicycle, person, animal, stairs, step_down, pothole, open_drain, construction, other.
-    - Direction + avoid action from `clear_side` (left/right/none), <= 4 words (e.g. chair center, clear_side right -> "कुर्सी आगे, दाएँ हटें" / "Chair ahead, step right").
-    - "other" with label speaks "{label} आगे" / "{label} ahead"; falls back to generic "खतरा" / "Hazard" only when label missing.
-    - Hard Rule 1 enforced: returns `""` when no hazard; never speaks "path clear".
-  - `server/meta_client.py`:
-    - `Hazard` schema updated with `clear_side: "left"|"right"|"none"` and `label` (max 2 words if other).
-    - `SYSTEM_PROMPT` updated with expanded enums without free-text generation.
+  - `apps/web/src/arbiter.ts` (new):
+    - PriorityArbiter class with P0-P3 priorities (emergency, hazard, nav, advisory)
+    - Message queue with interrupt semantics per AGENTS.md
+    - Dedupe same hazard type+direction for 4s
+    - Rate limit: max 1 hazard utterance per 1.5s (status messages excluded)
+    - TTL: hazard 2s, nav 10s, advisory 15s, emergency no TTL
+    - P0 interrupts everything immediately (never queued)
+    - P1 interrupts P2/P3 mid-sentence
+    - Status messages (vision paused/back/limited) are P1 with isStatus flag
+    - Status messages not held by hazards > 3s (interrupt after max wait)
+    - Factories: makeHazardMessage, makeNavMessage, makeAdvisoryMessage, makeEmergencyMessage, makeVisionPausedMessage, makeVisionBackMessage, makeVisionLimitedMessage
   - `apps/web/src/App.tsx`:
-    - Updated `HazardItem` interface; imports `buildPhrase` from `phrases.ts`.
-  - `server/tests/test_frame.py` (24 passing tests) & `apps/web/src/App.test.tsx` (6 passing tests):
-    - Verified chair center specific phrases with and without clear_side in hi and en.
-    - Verified "other" with label, "other" without label, and never "path clear".
-- Next: P2 Priority arbiter and queuing
+    - Integrated PriorityArbiter replacing direct speak() calls
+    - Hazard messages enqueued via makeHazardMessage with urgency/confidence
+    - Vision watchdog: tracks consecutive fetch failures (3 = Vision paused)
+    - On recovery: announces "Vision back" (debounced 10s)
+    - In degraded mode: periodic "Vision limited" every 15s
+    - Arbiter initialized in startVision, cleared in stopVision
+    - Speech timing (responseReceivedPerfMs) passed through for debug overlay
+  - `apps/web/src/arbiter.test.ts` (37 passing tests):
+    - Comprehensive test coverage for all arbiter behavior including status message interrupt
+    - **Refined P1 rate-limit policy tests (8 new tests):**
+      - Different-key hazards (pole-left after vehicle-right) are queued as "next" when P1 speaking, no rate limit
+      - Same-key hazards rate limited to 1.5s minimum interval
+      - Same-key repeat within 1.5s dropped at enqueue
+      - Urgency 3 interrupts a speaking P1 immediately
+      - At most one queued P1 (latest wins by timestamp desc for same urgency)
+      - Higher urgency P1 replaces lower urgency queued P1
+      - Same key within 4s dedupe window dropped at enqueue
+      - Same key after 4s dedupe window allowed
+  - `apps/web/src/App.test.tsx` (5 passing tests) & `server/tests/test_frame.py` (24 passing tests):
+    - All existing tests pass with arbiter integration
+  - `shared/phrases.json` (updated):
+    - Single source of truth for all phrases (nouns, directions, avoid_actions, system_messages)
+  - `apps/web/src/phrases.ts` (updated):
+    - Loads phrase tables from shared/phrases.json via @shared alias
+    - Exports NOUNS, DIRECTIONS, AVOID_ACTIONS, SYSTEM_MESSAGES, buildPhrase, getSystemMessage
+  - `apps/web/src/arbiter.ts` (updated):
+    - Status message factories now use SYSTEM_MESSAGES from shared phrases
+  - `server/phrases.py` (updated):
+    - Loads phrase tables from shared/phrases.json at module import
+    - Exports NOUNS, DIRECTIONS, AVOID_ACTIONS, SYSTEM_MESSAGES, build_phrase, get_system_message
+  - `apps/web/vite.config.ts` & `tsconfig.json`:
+    - Added @shared path alias for shared directory
+  - `apps/web/src/audio.ts` (new):
+    - Audio manifest loader for pre-rendered clips
+    - playClipOrTTS with TTS fallback for hazard and system phrases
+    - stopClip for interruption support
+    - getHazardClipKey, getSystemClipKey, hasClip, preloadClip utilities
+    - playSoftTick using Web Audio API (gentle 800 Hz sine wave, 200ms)
+  - `apps/web/public/audio/manifest.json`:
+    - Manifest mapping all hazard type:direction:clear_side combinations to audio files
+    - System message keys: vision_paused, vision_back, vision_limited, emergency_triggered, emergency_cancelled
+  - `apps/web/src/arbiter.ts` (updated):
+    - Factory functions now populate clipKey and clipType for all message types
+  - `apps/web/src/App.tsx` (updated):
+    - arbiterSpeak callback uses playClipOrTTS with TTS fallback
+    - arbiterCancel stops both speechSynthesis and audio clips
+    - Soft tick every 8s with UI toggle (only when vision running and not speaking)
+    - New onStart/onEnd callbacks in playClipOrTTS for proper arbiter lifecycle
+    - Hash-based router with /#demo page for priority arbiter testing
+    - DemoPage component with P0/P1/P2/P3 buttons, language selector, queue visualization
+    - **Fixed intermittent Android Chrome interruption bug**: Added utterance generation counter to prevent stale onend/onerror handlers from clearing arbiter state after cancel. cancelFn now takes priority, waits ~50ms for P0/P1 after cancel, bumps generation counter. Event handlers check generation before updating state. Added event logging (last 30 lines) on demo page.
+    - `apps/web/src/arbiter.ts` (updated): cancelFn now accepts optional priority parameter; all cancel call sites pass current/next priority.
+    - `apps/web/src/DemoPage.integration.test.tsx` (new test): 5-cycle P3→P1 interrupt test simulates late onend from cancelled utterance; all 5 cycles pass.
+  - **Refined P1 rate-limit policy implementation (Task 12):**
+    - `apps/web/src/arbiter.ts`: Rate limit (1.5s) and dedupe (4s) now apply ONLY to same-key repeats (same hazard type + direction). Different-key P1s or higher urgency P1s are never dropped — they interrupt P2/P3 immediately, or queue as "next" (max 1 queued, TTL 2s) when P1 is speaking. Urgency 3 always interrupts a speaking P1 immediately. Only same-key repeats and expired messages are dropped.
+    - `apps/web/src/arbiter.test.ts`: Added 8 new tests covering the refined policy
+    - `apps/web/src/arbiter.stateful.test.ts`: Updated property test to only check 4s dedupe window for same-key hazards (1.5s interval not testable with fake speech engine)
+    - All 67 tests pass (37 arbiter unit tests + 6 property tests + 9 property tests + 5 App tests + 9 integration tests + 1 smoke test)
+- Next: All P2 tasks complete (arbiter, watchdog, shared phrases, audio clips, soft tick, demo page, property tests, phase numbering fix, refined P1 rate-limit policy)
 - Blockers: None
 
 ## Open issues and risks
