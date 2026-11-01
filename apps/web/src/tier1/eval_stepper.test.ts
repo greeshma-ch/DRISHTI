@@ -1,8 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_SAMPLE_INTERVAL_SEC,
+  MAX_NO_PROGRESS_MS,
+  MAX_RECOVERY_ATTEMPTS,
   VideoClipSampler,
   IVideoElement,
+  calculateDecisionSummary,
   createMissedHazardLog,
   extractDiagnostics,
   formatAlertsToCsv,
@@ -10,7 +13,10 @@ import {
   formatNetworkState,
   formatReadyState,
   getFfmpegConversionCommand,
+  getFfmpegDownscaleCommand,
   isHevcClip,
+  isHighResolutionClip,
+  markAllUnlabeledAsCorrect,
   waitForSeek,
 } from "./eval_stepper";
 import { updateTracker } from "./math";
@@ -323,13 +329,64 @@ describe("Tier 1 Android Chrome Hardware Sampling & Eval Stepper (Req 1-5)", () 
     });
   });
 
-  describe("4. Stall Reporting for Both Paths (Req 5)", () => {
-    it("reports stall on rVFC path when mediaTime does not advance within 2s", async () => {
+  describe("4. Stall Recovery & High-Resolution Warnings (Req 1)", () => {
+    it("recovers on waiting, stalled, and unexpected pause events, increments recovery count", async () => {
+      const mockVideo = new MockVideoElement(true);
+      mockVideo.duration = 20.0;
+      mockVideo.currentTime = 11.96;
+      mockVideo.readyState = 2; // HAVE_CURRENT_DATA
+
+      let recoveredTimes = 0;
+      let recoveringState = false;
+
+      const sampler = new VideoClipSampler(
+        mockVideo,
+        {
+          onStep: async () => {},
+          onRecovery: (count, isRecovering) => {
+            recoveredTimes = count;
+            recoveringState = isRecovering;
+          },
+        },
+        0.4
+      );
+
+      await sampler.start(true);
+      expect(sampler.getRecoveryCount()).toBe(0);
+
+      // Trigger 'waiting' event (as occurred on real phone at t=11.96s)
+      const recoverPromise1 = sampler.handleStallTrigger("waiting");
+      expect(recoveringState).toBe(true);
+
+      // Simulate buffer fill -> canplay event
+      mockVideo.readyState = 3;
+      mockVideo.trigger("canplay");
+      await recoverPromise1;
+
+      expect(sampler.getRecoveryCount()).toBe(1);
+      expect(recoveredTimes).toBe(1);
+      expect(recoveringState).toBe(false);
+
+      // Trigger unexpected pause event
+      const recoverPromise2 = sampler.handleStallTrigger("unexpected_pause");
+      expect(recoveringState).toBe(true);
+
+      mockVideo.trigger("canplay");
+      await recoverPromise2;
+
+      expect(sampler.getRecoveryCount()).toBe(2);
+      expect(recoveredTimes).toBe(2);
+      expect(recoveringState).toBe(false);
+
+      sampler.stop();
+    });
+
+    it("aborts only after 8 s with no progress", async () => {
       vi.useFakeTimers();
 
       const mockVideo = new MockVideoElement(true);
-      mockVideo.duration = 10.0;
-      mockVideo.currentTime = 2.4;
+      mockVideo.duration = 20.0;
+      mockVideo.currentTime = 11.96;
 
       let stallMessage = "";
       const sampler = new VideoClipSampler(
@@ -345,14 +402,82 @@ describe("Tier 1 Android Chrome Hardware Sampling & Eval Stepper (Req 1-5)", () 
 
       await sampler.start(true);
 
-      // Video starts, but decoder hangs and mediaTime never advances
-      // Advance timers past 2000 ms stall threshold
-      await vi.advanceTimersByTimeAsync(2200);
+      // Advance 7.5 seconds with no progress -> still running (not aborted yet)
+      await vi.advanceTimersByTimeAsync(7500);
+      expect(sampler.getRunning()).toBe(true);
+      expect(stallMessage).toBe("");
 
-      expect(stallMessage).toBe("video stalled at t=2.40s");
+      // Advance past 8.0 seconds (MAX_NO_PROGRESS_MS = 8000)
+      await vi.advanceTimersByTimeAsync(MAX_NO_PROGRESS_MS - 7500 + 300);
+
+      expect(stallMessage).toContain("aborted: no progress for 8s");
+      expect(stallMessage).toContain("t=11.96s");
       expect(sampler.getRunning()).toBe(false);
 
       vi.useRealTimers();
+    });
+
+    it("aborts after 3 consecutive failed recovery attempts", async () => {
+      vi.useFakeTimers();
+
+      const mockVideo = new MockVideoElement(true);
+      mockVideo.duration = 20.0;
+      mockVideo.currentTime = 5.0;
+      mockVideo.readyState = 0; // readyState stays 0 -> canplay never fires
+
+      let stallMessage = "";
+      const sampler = new VideoClipSampler(
+        mockVideo,
+        {
+          onStep: async () => {},
+          onStall: (msg) => {
+            stallMessage = msg;
+          },
+        },
+        0.4
+      );
+
+      await sampler.start(true);
+
+      // Attempt 1 fails (timeout 2000ms without canplay)
+      const p1 = sampler.handleStallTrigger("stall_1");
+      await vi.advanceTimersByTimeAsync(2100);
+      await p1;
+      expect(sampler.getRunning()).toBe(true);
+
+      // Attempt 2 fails
+      const p2 = sampler.handleStallTrigger("stall_2");
+      await vi.advanceTimersByTimeAsync(2100);
+      await p2;
+      expect(sampler.getRunning()).toBe(true);
+
+      // Attempt 3 fails
+      const p3 = sampler.handleStallTrigger("stall_3");
+      await vi.advanceTimersByTimeAsync(2100);
+      await p3;
+
+      // Attempt 4 triggers immediate abort due to 3 failed recoveries
+      await sampler.handleStallTrigger("stall_4");
+
+      expect(stallMessage).toContain(`aborted after ${MAX_RECOVERY_ATTEMPTS} failed recoveries`);
+      expect(sampler.getRunning()).toBe(false);
+
+      vi.useRealTimers();
+    });
+
+    it("detects clips wider than 854 px and generates valid ffmpeg downscale command", () => {
+      expect(isHighResolutionClip({ videoWidth: 1920 })).toBe(true); // 1080p
+      expect(isHighResolutionClip({ videoWidth: 1280 })).toBe(true); // 720p
+      expect(isHighResolutionClip({ videoWidth: 854 })).toBe(false); // 480p boundary
+      expect(isHighResolutionClip({ videoWidth: 640 })).toBe(false); // 360p
+
+      const cmd = getFfmpegDownscaleCommand("street_walk_1080p.mp4");
+      expect(cmd).toContain('ffmpeg -i "street_walk_1080p.mp4"');
+      expect(cmd).toContain('-vf "scale=854:-2"');
+      expect(cmd).toContain("-c:v libx264");
+      expect(cmd).toContain("-pix_fmt yuv420p");
+      expect(cmd).toContain("-c:a copy");
+      expect(cmd).toContain('"street_walk_1080p_480p.mp4"');
     });
 
     it("reports stall on seek path when seek does not complete within 2s", async () => {
@@ -550,6 +675,262 @@ describe("Tier 1 Android Chrome Hardware Sampling & Eval Stepper (Req 1-5)", () 
       expect(cmd).toContain("-pix_fmt yuv420p");
       expect(cmd).toContain("-c:a aac");
       expect(cmd).toContain('"phone_walk_hevc_h264.mp4"');
+    });
+  });
+
+  describe("7. Label State, Summary Math & Ground Truth Metrics (Req 2)", () => {
+    it("handles label states on alerted rows and suppressed rows", () => {
+      const alertedRow: TrackDecisionLog = {
+        id: "d1",
+        clip: "eval.mp4",
+        t: 1.0,
+        class: "vehicle",
+        direction: "center",
+        decision: "alerted",
+        reason: "closing rapidly",
+        label: "",
+        trackId: 1,
+      };
+
+      const suppressedRow: TrackDecisionLog = {
+        id: "d2",
+        clip: "eval.mp4",
+        t: 1.5,
+        class: "person",
+        direction: "left",
+        decision: "suppressed: not_in_center",
+        reason: "person on left",
+        label: "",
+        trackId: 2,
+      };
+
+      // Alerted row can be labeled "True alert" or "False alert"
+      const trueAlert = { ...alertedRow, label: "True alert" };
+      const falseAlert = { ...alertedRow, label: "False alert" };
+      expect(trueAlert.label).toBe("True alert");
+      expect(falseAlert.label).toBe("False alert");
+
+      // Suppressed row can be labeled "Correct silence" or "Should have alerted"
+      const correctSilence = { ...suppressedRow, label: "Correct silence" };
+      const shouldHaveAlerted = { ...suppressedRow, label: "Should have alerted" };
+      expect(correctSilence.label).toBe("Correct silence");
+      expect(shouldHaveAlerted.label).toBe("Should have alerted");
+    });
+
+    it("creates missed hazard entry with label='Should have alerted'", () => {
+      const missed = createMissedHazardLog("street.mp4", 3.25, "stairs", "center");
+      expect(missed.clip).toBe("street.mp4");
+      expect(missed.t).toBe(3.25);
+      expect(missed.class).toBe("stairs");
+      expect(missed.direction).toBe("center");
+      expect(missed.decision).toBe("missed_hazard");
+      expect(missed.label).toBe("Should have alerted");
+      expect(missed.reason).toContain("Manually marked missed stairs on center");
+    });
+
+    it("bulk marks all unlabeled rows as correct while preserving already labeled rows", () => {
+      const logs: TrackDecisionLog[] = [
+        {
+          id: "1",
+          clip: "clip.mp4",
+          t: 1.0,
+          class: "vehicle",
+          direction: "center",
+          decision: "alerted",
+          reason: "fast closing",
+          label: "", // Unlabeled -> should become "True alert"
+          trackId: 1,
+        },
+        {
+          id: "2",
+          clip: "clip.mp4",
+          t: 1.5,
+          class: "person",
+          direction: "left",
+          decision: "suppressed: not_closing",
+          reason: "lateral person",
+          label: "", // Unlabeled -> should become "Correct silence"
+          trackId: 2,
+        },
+        {
+          id: "3",
+          clip: "clip.mp4",
+          t: 2.0,
+          class: "bicycle",
+          direction: "center",
+          decision: "alerted",
+          reason: "bicycle center",
+          label: "False alert", // Already labeled -> must be preserved!
+          trackId: 3,
+        },
+        {
+          id: "4",
+          clip: "clip.mp4",
+          t: 2.5,
+          class: "pole",
+          direction: "right",
+          decision: "suppressed: static_side_obstacle",
+          reason: "pole at right",
+          label: "Should have alerted", // Already labeled -> must be preserved!
+          trackId: 4,
+        },
+        {
+          id: "5",
+          clip: "clip.mp4",
+          t: 3.0,
+          class: "stairs",
+          direction: "center",
+          decision: "missed_hazard",
+          reason: "missed stairs",
+          label: "", // Missed -> should become "Should have alerted"
+          trackId: -1,
+        },
+      ];
+
+      const updated = markAllUnlabeledAsCorrect(logs);
+
+      expect(updated[0]!.label).toBe("True alert");
+      expect(updated[1]!.label).toBe("Correct silence");
+      expect(updated[2]!.label).toBe("False alert"); // Preserved
+      expect(updated[3]!.label).toBe("Should have alerted"); // Preserved
+      expect(updated[4]!.label).toBe("Should have alerted");
+    });
+
+    it("calculates summary metrics math accurately (TP, FP, TN, FN, alerts/min, precision, recall)", () => {
+      const logs: TrackDecisionLog[] = [
+        // 3 True Alerts (TP)
+        { id: "1", clip: "c", t: 1, class: "car", direction: "center", decision: "alerted", reason: "r", label: "True alert", trackId: 1 },
+        { id: "2", clip: "c", t: 2, class: "bike", direction: "center", decision: "alerted", reason: "r", label: "True alert", trackId: 2 },
+        { id: "3", clip: "c", t: 3, class: "dog", direction: "center", decision: "alerted", reason: "r", label: "True", trackId: 3 },
+
+        // 1 False Alert (FP)
+        { id: "4", clip: "c", t: 4, class: "bag", direction: "center", decision: "alerted", reason: "r", label: "False alert", trackId: 4 },
+
+        // 4 Correct Silences (TN)
+        { id: "5", clip: "c", t: 5, class: "person", direction: "left", decision: "suppressed: lateral", reason: "r", label: "Correct silence", trackId: 5 },
+        { id: "6", clip: "c", t: 6, class: "person", direction: "right", decision: "suppressed: lateral", reason: "r", label: "Correct silence", trackId: 6 },
+        { id: "7", clip: "c", t: 7, class: "pole", direction: "left", decision: "suppressed: static_side", reason: "r", label: "Correct silence", trackId: 7 },
+        { id: "8", clip: "c", t: 8, class: "chair", direction: "right", decision: "suppressed: static_side", reason: "r", label: "Correct silence", trackId: 8 },
+
+        // 2 Missed Hazards (FN): 1 suppressed marked "Should have alerted", 1 manual missed
+        { id: "9", clip: "c", t: 9, class: "pothole", direction: "center", decision: "suppressed: static", reason: "r", label: "Should have alerted", trackId: 9 },
+        createMissedHazardLog("c", 10, "stairs", "center"),
+
+        // 1 Unlabeled Alert
+        { id: "11", clip: "c", t: 11, class: "vehicle", direction: "center", decision: "alerted", reason: "r", label: "", trackId: 11 },
+
+        // 1 Unlabeled Suppressed
+        { id: "12", clip: "c", t: 12, class: "tree", direction: "left", decision: "suppressed: side", reason: "r", label: "", trackId: 12 },
+      ];
+
+      // Clip duration = 30 seconds (0.5 minutes)
+      const summary = calculateDecisionSummary(logs, 30);
+
+      expect(summary.trueAlerts).toBe(3);
+      expect(summary.falseAlerts).toBe(1);
+      expect(summary.correctSilences).toBe(4);
+      expect(summary.missedHazards).toBe(2);
+      expect(summary.unlabeled).toBe(2);
+      expect(summary.totalDecisions).toBe(12);
+      expect(summary.totalAlerts).toBe(5);
+
+      // Alerts / min = 5 / (30/60) = 10.0
+      expect(summary.alertsPerMin).toBe(10);
+
+      // Precision = TP / (TP + FP) = 3 / (3 + 1) = 3 / 4 = 0.75 (75.0%)
+      expect(summary.precision).toBe(0.75);
+      expect(summary.precisionPercent).toBe("75.0%");
+
+      // Recall = TP / (TP + FN) = 3 / (3 + 2) = 3 / 5 = 0.6 (60.0%)
+      expect(summary.recall).toBe(0.6);
+      expect(summary.recallPercent).toBe("60.0%");
+    });
+
+    it("safely handles zero-denominator edge cases in precision and recall", () => {
+      // Empty decisions
+      const emptySummary = calculateDecisionSummary([], 10);
+      expect(emptySummary.trueAlerts).toBe(0);
+      expect(emptySummary.falseAlerts).toBe(0);
+      expect(emptySummary.precision).toBe(0);
+      expect(emptySummary.precisionPercent).toBe("N/A");
+      expect(emptySummary.recall).toBe(0);
+      expect(emptySummary.recallPercent).toBe("N/A");
+      expect(emptySummary.alertsPerMin).toBe(0);
+
+      // Only silences, no alerts and no missed
+      const silenceSummary = calculateDecisionSummary(
+        [
+          { id: "1", clip: "c", t: 1, class: "person", direction: "left", decision: "suppressed: side", reason: "r", label: "Correct silence", trackId: 1 },
+        ],
+        60
+      );
+      expect(silenceSummary.trueAlerts).toBe(0);
+      expect(silenceSummary.correctSilences).toBe(1);
+      expect(silenceSummary.precisionPercent).toBe("N/A");
+      expect(silenceSummary.recallPercent).toBe("N/A");
+      expect(silenceSummary.alertsPerMin).toBe(0);
+    });
+
+    it("exports CSV with all labels properly populated in the label column", () => {
+      const logs: TrackDecisionLog[] = [
+        {
+          id: "dec_1",
+          clip: "test_walk.mp4",
+          t: 1.2,
+          sample_time: 1.2,
+          class: "vehicle",
+          direction: "center",
+          decision: "alerted",
+          reason: "fast approach",
+          label: "True alert",
+          trackId: 1,
+        },
+        {
+          id: "dec_2",
+          clip: "test_walk.mp4",
+          t: 2.0,
+          sample_time: 2.0,
+          class: "person",
+          direction: "left",
+          decision: "suppressed: not_closing",
+          reason: "passing sideways",
+          label: "Correct silence",
+          trackId: 2,
+        },
+        {
+          id: "dec_3",
+          clip: "test_walk.mp4",
+          t: 3.5,
+          sample_time: 3.5,
+          class: "bicycle",
+          direction: "center",
+          decision: "alerted",
+          reason: "reflection",
+          label: "False alert",
+          trackId: 3,
+        },
+        {
+          id: "dec_4",
+          clip: "test_walk.mp4",
+          t: 4.8,
+          sample_time: 4.8,
+          class: "stairs",
+          direction: "center",
+          decision: "missed_hazard",
+          reason: "Manually marked missed stairs",
+          label: "Should have alerted",
+          trackId: -1,
+        },
+      ];
+
+      const csv = formatDecisionsToCsv(logs, "test_walk.mp4");
+      const lines = csv.trim().split("\n");
+
+      expect(lines[0]).toBe("id,clip,sample_time,t,class,direction,decision,reason,label");
+      expect(lines[1]).toContain('"True alert"');
+      expect(lines[2]).toContain('"Correct silence"');
+      expect(lines[3]).toContain('"False alert"');
+      expect(lines[4]).toContain('"Should have alerted"');
     });
   });
 });

@@ -76,35 +76,38 @@ Throttle levels are defined in AGENTS.md (warn $60, throttle $90, block dev call
 | Nov 01 | Tier 1 Deterministic Stepper & Evaluation (Task A) | Deterministic 0.25s video stepper via seeked events; stall detector (2s timeout); deduplicated decision logs (logged on state change); capped 200 row display; missed hazard logging; HEVC alert banner |
 | Nov 01 | Tier 2 Truncation Reduction & Monitoring (Task B) | First attempt max_tokens=800, retry=1200; shortened prompt with one-line JSON example; retries/total frames and median reasoning tokens in /status and Debug Overlay; >10% retry warning |
 | Nov 01 | Tier 1 Android Chrome Hardware Sampling & Telemetry | requestVideoFrameCallback (rVFC) sampling at playbackRate 1, muted, 0.4s default; seek fallback; loadeddata gate; video diagnostics HUD (readyState, networkState, errors, dimensions, 10 events); whole-clip evaluation with alert True/False/Missed marking & CSV export |
+| Nov 01 | Tier 1 Stall Recovery & Decision Labeling | Automatic stall recovery (waiting/stalled/pause -> wait canplay -> play; abort 3 failed recoveries or 8s no progress); 320px capture downscaling; >854px warning with ffmpeg downscale command; decision row labeling buttons (True/False alert, Correct silence/Should have alerted), bulk "Mark all unlabeled as correct", "+ Mark Missed" hazard logging; live summary metrics (TP, FP, TN, FN, alerts/min, precision, recall) and CSV export |
 
 ## Current session
 
-- Working on: Android Chrome Tier 1 Fix (requestVideoFrameCallback, Diagnostics, loadeddata gate, Whole Clip Eval) (COMPLETED)
+- Working on: Tier 1 Android Phone Stall Recovery & Decision Labeling (COMPLETED)
 - Done this session:
-  - **Video Pipeline Diagnostics HUD (Item 1)**:
-    - Displayed live `video.readyState` (with mapped descriptions `0: HAVE_NOTHING` to `4: HAVE_ENOUGH_DATA`).
-    - Displayed `video.networkState`, `video.error` code/message, duration, and resolution (`videoWidth x videoHeight`).
-    - Displayed rolling telemetry buffer of the last 10 media events (`loadeddata`, `seeking`, `seeked`, `canplay`, `stalled`, `error`, etc.) with timestamps.
-  - **Clip Loading & loadeddata Gate (Item 2)**:
-    - Clips loaded via `URL.createObjectURL(file)`.
-    - Added required attributes: `muted`, `playsInline`, `preload="auto"`.
-    - Gated all control buttons (`Run Clip Evaluation`, `Play Sampling`, `Cancel`, `+ Mark Missed Hazard`) to remain disabled until `loadeddata` event fires.
-  - **requestVideoFrameCallback Sampling with Seek Fallback (Item 3)**:
-    - Implemented `VideoClipSampler`: plays video muted at `playbackRate = 1.0` and samples frames via `requestVideoFrameCallback` only when `mediaTime` advances by `sampleIntervalSec` (default 0.4s, adjustable) AND `detector.isBusy()` is false.
-    - Used `mediaTime` directly as the timestamp for tracking, closing speed calculations, and time-based rules.
-    - Automatic fallback to seek-based stepper when `requestVideoFrameCallback` is unsupported.
-    - 2.0 s stall watchdog reporting `"video stalled at t=..."`.
-  - **Whole Clip Automatic Evaluation & Alerts Marking (Item 4)**:
-    - "Run Clip Evaluation" executes entire clip automatically through detector, tracker, and live `PriorityArbiter`.
-    - Removed "Before vs After" comparison panel and `+/-0.25 s` buttons.
-    - Shows alert list with dedicated **True / False / Missed** annotation buttons and **Export Alerts CSV** button.
-  - **Testing & Verification (Item 5)**:
-    - 12 comprehensive unit tests in `apps/web/src/tier1/eval_stepper.test.ts` covering mocked video events for both paths, stall reporting, and decision change deduplication.
-    - `vitest run`: 112 passed across 8 test suites.
+  - **Stall Recovery & Hardware Downscale (Item 1)**:
+    - Implemented automatic stall recovery in `VideoClipSampler`: on `waiting`, `stalled`, or unexpected `pause` (browser/codec starvation), pauses sampler, waits for `canplay` (timeout 2s), calls `play()`, increments `recoveryCount`, and continues playback seamlessly.
+    - Telemetry HUD displays live count: `"recovered N times"` and active recovery indicator.
+    - Abort safety: aborts only after 3 consecutive failed recovery attempts or 8 s without progress (`Date.now() - lastProgressTimestamp >= 8000`).
+    - Fixed memory exhaustion on mobile Chrome by capturing frames with `createImageBitmap(source, { resizeWidth: targetWidth, resizeHeight: targetHeight, resizeQuality: "low" })` (where `targetWidth <= 320`), avoiding full-resolution (e.g. 1080p) bitmap copies in memory.
+    - Added high-resolution warning banner in `Tier1ReviewPage` for clips wider than 854 px with one-click copyable ffmpeg downscale command: `ffmpeg -i input.mp4 -vf "scale=854:-2" -c:v libx264 -pix_fmt yuv420p -c:a copy output_480p.mp4`.
+  - **Decision Labeling & Ground Truth Metrics (Item 2)**:
+    - Every row in the Tracked Object Decisions Log now has ground truth labeling buttons:
+      - `"alerted"` rows: `"True alert"` and `"False alert"`
+      - `suppressed` rows: `"Correct silence"` and `"Should have alerted"`
+      - Current label displayed on each row as a distinct colored badge (`True alert` green, `False alert` red, `Correct silence` blue, `Should have alerted` amber, `Unlabeled` muted).
+    - Bulk action: `"✓ Mark all unlabeled as correct"` button automatically labels all unlabeled alerted rows as `"True alert"`, suppressed rows as `"Correct silence"`, and missed rows as `"Should have alerted"`.
+    - `"+ Mark Missed"` button and modal records current playback time with hazard type and direction picker, producing a row with `label = "Should have alerted"`.
+    - Added live Ground Truth Summary Metrics panel displaying:
+      - True Alerts ($TP$), False Alerts ($FP$), Correct Silences ($TN$), Missed Hazards ($FN$)
+      - Alerts / Min ($totalAlerts / (clipDurationSec / 60)$)
+      - Precision ($TP / (TP + FP)$) and Recall ($TP / (TP + FN)$) with zero-denominator safety (`"N/A"`)
+      - Unlabeled count
+    - `formatDecisionsToCsv` includes the `label` column containing all assigned ground truth labels.
+  - **Testing & Verification**:
+    - `eval_stepper.test.ts`: 21 tests covering stall recovery on waiting/stalled/pause, recovery counting, 8s no-progress abort, 3 failed recoveries abort, >854px warning check, label state transitions, bulk labeling, summary math, edge cases, and CSV export.
+    - `vitest run`: 121 tests passed across all 8 test files in `apps/web`.
     - `tsc --noEmit`: 0 errors.
-    - `npm run lint`: 0 errors.
-    - `npm run build`: built in 14.20s.
-    - `pytest server/tests`: 28 passed.
+    - `eslint`: 0 errors.
+    - `vite build`: built cleanly in 9.04s.
+    - `pytest server/tests`: 28 passed in 0.84s.
 - Next: P4 Tier 2 hardening, rate limiter, spend guard.
 - Blockers: None
 

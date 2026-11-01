@@ -2,18 +2,21 @@
  * Deterministic video sampler and stepper for Tier 1 clip evaluation.
  *
  * Supports:
- * 1. requestVideoFrameCallback (rVFC) sampling as primary path:
- *    - Plays clip muted at playbackRate 1.0.
- *    - Samples frames when mediaTime advances by sample interval (default 0.4s, adjustable)
- *      AND the detector is idle.
- *    - Uses mediaTime as the timestamp for tracking, closing speed, and rules.
- * 2. Seek-based stepper fallback when requestVideoFrameCallback is unsupported:
- *    - Seeks in steps of sample interval with 2.0s stall timeout.
- * 3. Video diagnostics:
- *    - readyState, networkState, error code, duration, videoWidth/Height,
- *      and the last 10 media events (loadeddata, seeking, seeked, canplay, stalled, error, etc.).
- * 4. HEVC detection & ffmpeg conversion instructions.
- * 5. Deduplicated CSV export for decisions and alerts with True/False/Missed marking.
+ * 1. requestVideoFrameCallback (rVFC) sampling with automatic stall recovery:
+ *    - On waiting, stalled, or unexpected pause: pauses sampler, waits for canplay, calls play() again, continues.
+ *    - Counts recoveries ("recovered N times").
+ *    - Aborts only after 3 failed recoveries or 8 s without progress.
+ *    - Captures frames with createImageBitmap(video, {resizeWidth: 320}) so full-resolution frame is never copied.
+ *    - Detects clips > 854 px wide and provides ffmpeg downscale command.
+ * 2. Seek-based stepper fallback when requestVideoFrameCallback is unsupported.
+ * 3. Video diagnostics telemetry (readyState, networkState, error code, duration, videoWidth/Height, last 10 events).
+ * 4. Ground truth labeling:
+ *    - "True alert" / "False alert" on alerted rows.
+ *    - "Correct silence" / "Should have alerted" on suppressed rows.
+ *    - Bulk "Mark all unlabeled as correct".
+ *    - "+ Mark Missed" hazard logging.
+ *    - Summary metrics: true alerts, false alerts, correct silences, missed hazards, alerts/min, precision, recall.
+ *    - CSV export with all labels.
  */
 
 import { Direction, Tier1HazardType, TrackDecisionLog } from "./types";
@@ -21,6 +24,8 @@ import { Direction, Tier1HazardType, TrackDecisionLog } from "./types";
 export const DEFAULT_SAMPLE_INTERVAL_SEC = 0.4;
 export const DEFAULT_STEP_SEC = 0.4;
 export const SEEK_TIMEOUT_MS = 2000;
+export const MAX_RECOVERY_ATTEMPTS = 3;
+export const MAX_NO_PROGRESS_MS = 8000;
 
 export interface IVideoElement {
   currentTime: number;
@@ -62,6 +67,7 @@ export interface VideoDiagnostics {
   videoWidth: number;
   videoHeight: number;
   lastEvents: VideoMediaEvent[];
+  recoveryCount: number;
 }
 
 export function formatReadyState(state: number): string {
@@ -96,11 +102,24 @@ export function formatNetworkState(state: number): string {
   }
 }
 
+/** Check if clip resolution is larger than 854 px wide (e.g. 1080p or 720p). */
+export function isHighResolutionClip(video: { videoWidth?: number }): boolean {
+  return (video.videoWidth ?? 0) > 854;
+}
+
+/** Generate ffmpeg command to downscale high-resolution videos to standard 480p (854 px wide). */
+export function getFfmpegDownscaleCommand(filename: string): string {
+  const safeName = filename || "input.mp4";
+  const base = safeName.replace(/\.[^/.]+$/, "");
+  return `ffmpeg -i "${safeName}" -vf "scale=854:-2" -c:v libx264 -pix_fmt yuv420p -c:a copy "${base}_480p.mp4"`;
+}
+
 /** Extract full diagnostic snapshot from video element. */
 export function extractDiagnostics(
   video: IVideoElement,
   lastEvents: VideoMediaEvent[] = [],
-  newEvent?: string
+  newEvent?: string,
+  recoveryCount = 0
 ): VideoDiagnostics {
   const events = [...lastEvents];
   if (newEvent) {
@@ -126,6 +145,7 @@ export function extractDiagnostics(
     videoWidth: video.videoWidth || 0,
     videoHeight: video.videoHeight || 0,
     lastEvents: events,
+    recoveryCount,
   };
 }
 
@@ -136,6 +156,7 @@ export interface SamplerCallbacks {
   onError?: (errorMessage: string) => void;
   onComplete?: () => void;
   onPause?: () => void;
+  onRecovery?: (recoveryCount: number, isRecovering: boolean) => void;
   isDetectorIdle?: () => boolean;
 }
 
@@ -215,15 +236,28 @@ export async function waitForSeek(
 }
 
 /**
- * Video clip sampler supporting requestVideoFrameCallback with seek fallback.
+ * Video clip sampler supporting requestVideoFrameCallback with automatic stall recovery
+ * and seek fallback.
  */
 export class VideoClipSampler {
   protected isRunning = false;
   protected isPaused = false;
   protected isCancelled = false;
+  protected userPaused = false;
+  protected isRecovering = false;
   protected sampleIntervalSec: number;
   protected rvfcHandle: number | null = null;
   protected watchdogTimer: ReturnType<typeof setInterval> | null = null;
+
+  // Recovery tracking
+  protected recoveryCount = 0;
+  protected consecutiveFailedRecoveries = 0;
+  protected lastProgressTimestamp = Date.now();
+  protected lastSeenMediaTime = 0;
+
+  private boundOnWaiting: (() => void) | null = null;
+  private boundOnStalled: (() => void) | null = null;
+  private boundOnPause: (() => void) | null = null;
 
   constructor(
     protected video: IVideoElement,
@@ -239,6 +273,10 @@ export class VideoClipSampler {
 
   public getPaused(): boolean {
     return this.isPaused;
+  }
+
+  public getRecoveryCount(): number {
+    return this.recoveryCount;
   }
 
   public getMode(): "rvfc" | "seek" {
@@ -257,6 +295,11 @@ export class VideoClipSampler {
     this.isRunning = true;
     this.isPaused = false;
     this.isCancelled = false;
+    this.userPaused = false;
+    this.isRecovering = false;
+    this.consecutiveFailedRecoveries = 0;
+    this.lastProgressTimestamp = Date.now();
+    this.lastSeenMediaTime = this.video.currentTime;
 
     if (this.getMode() === "rvfc") {
       await this.startRvfc(startFromCurrent);
@@ -266,7 +309,7 @@ export class VideoClipSampler {
   }
 
   /**
-   * Primary sampling path via requestVideoFrameCallback.
+   * Primary sampling path via requestVideoFrameCallback with automatic stall recovery.
    */
   private async startRvfc(startFromCurrent: boolean): Promise<void> {
     const video = this.video;
@@ -280,36 +323,50 @@ export class VideoClipSampler {
     }
 
     let lastSampledMediaTime = -Infinity;
-    let lastSeenMediaTime = video.currentTime;
-    let elapsedWithoutAdvanceMs = 0;
+    this.lastSeenMediaTime = video.currentTime;
+    this.lastProgressTimestamp = Date.now();
 
-    // 2s Stall Watchdog checking every 250ms
+    // Attach stall recovery listeners for waiting, stalled, and unexpected pause (Req 1)
+    this.boundOnWaiting = () => {
+      this.handleStallTrigger("waiting");
+    };
+    this.boundOnStalled = () => {
+      this.handleStallTrigger("stalled");
+    };
+    this.boundOnPause = () => {
+      // If paused unexpectedly by browser/codec while sampler is running
+      if (this.isRunning && !this.userPaused && !this.isCancelled) {
+        this.handleStallTrigger("unexpected_pause");
+      }
+    };
+
+    video.addEventListener("waiting", this.boundOnWaiting);
+    video.addEventListener("stalled", this.boundOnStalled);
+    video.addEventListener("pause", this.boundOnPause);
+
+    // Watchdog checking stall recovery and 8s no-progress abort limit (Req 1)
     this.watchdogTimer = setInterval(() => {
-      if (!this.isRunning || this.isPaused || this.isCancelled) return;
+      if (!this.isRunning || this.userPaused || this.isCancelled) return;
       if (video.ended) return;
 
-      elapsedWithoutAdvanceMs += 250;
-      if (elapsedWithoutAdvanceMs >= 2000) {
+      const elapsedNoProgress = Date.now() - this.lastProgressTimestamp;
+
+      // Abort after 8 s with no progress
+      if (elapsedNoProgress >= MAX_NO_PROGRESS_MS) {
         this.stop();
-        const msg = `video stalled at t=${lastSeenMediaTime.toFixed(2)}s`;
+        const msg = `video stalled at t=${this.lastSeenMediaTime.toFixed(2)}s (aborted: no progress for 8s)`;
         this.callbacks.onStall?.(msg);
+        return;
+      }
+
+      // If no progress for 2.0 s and not currently recovering, attempt recovery
+      if (!this.isRecovering && elapsedNoProgress >= 2000) {
+        this.handleStallTrigger("watchdog_timeout");
       }
     }, 250);
 
-    // Watch for stalled event from media pipeline
-    const onStalledEvent = () => {
-      if (!this.isRunning || this.isPaused || this.isCancelled) return;
-      setTimeout(() => {
-        if (this.isRunning && elapsedWithoutAdvanceMs >= 1800) {
-          this.stop();
-          this.callbacks.onStall?.(`video stalled at t=${video.currentTime.toFixed(2)}s`);
-        }
-      }, 500);
-    };
-    video.addEventListener("stalled", onStalledEvent);
-
     const onFrame = (_now: number, metadata: { mediaTime: number; presentedFrames?: number }) => {
-      if (!this.isRunning || this.isPaused || this.isCancelled) return;
+      if (!this.isRunning || this.isPaused || this.isCancelled || this.isRecovering) return;
 
       // Immediately queue next rVFC so no frames are dropped
       this.rvfcHandle = video.requestVideoFrameCallback!(onFrame);
@@ -317,22 +374,21 @@ export class VideoClipSampler {
       const mediaTime = metadata?.mediaTime ?? video.currentTime;
       const duration = video.duration || 0;
 
-      // Update watchdog on progress
-      if (mediaTime > lastSeenMediaTime + 0.005) {
-        lastSeenMediaTime = mediaTime;
-        elapsedWithoutAdvanceMs = 0;
+      // Progress detected: reset watchdog timestamp and failed recovery counter
+      if (mediaTime > this.lastSeenMediaTime + 0.005) {
+        this.lastSeenMediaTime = mediaTime;
+        this.lastProgressTimestamp = Date.now();
+        this.consecutiveFailedRecoveries = 0;
       }
 
       if (video.ended || (duration > 0 && mediaTime >= duration - 0.05)) {
         this.stop();
-        video.removeEventListener("stalled", onStalledEvent);
         this.callbacks.onComplete?.();
         return;
       }
 
       if (video.error) {
         this.stop();
-        video.removeEventListener("stalled", onStalledEvent);
         this.callbacks.onError?.(
           `Video error: ${video.error.message || `Code ${video.error.code}`}`
         );
@@ -351,7 +407,6 @@ export class VideoClipSampler {
           })
           .catch((err) => {
             this.stop();
-            video.removeEventListener("stalled", onStalledEvent);
             this.callbacks.onError?.(`Step error at t=${mediaTime.toFixed(2)}s: ${String(err)}`);
           });
       }
@@ -362,12 +417,123 @@ export class VideoClipSampler {
     if (video.play) {
       try {
         await video.play();
-      } catch (err) {
-        this.stop();
-        video.removeEventListener("stalled", onStalledEvent);
-        this.callbacks.onError?.(`Failed to start video playback: ${String(err)}`);
+      } catch {
+        this.handleStallTrigger("play_failed");
       }
     }
+  }
+
+  /**
+   * Automatic stall recovery handler (Req 1):
+   * On waiting, stalled or unexpected pause:
+   * 1. Pauses sampler
+   * 2. Waits for canplay
+   * 3. Calls play() again and continues
+   * 4. Increments recovery count ("recovered N times")
+   * 5. Aborts after 3 failed recoveries or 8s no progress
+   */
+  public async handleStallTrigger(_trigger: string): Promise<void> {
+    if (!this.isRunning || this.userPaused || this.isCancelled) return;
+    if (this.isRecovering) return;
+
+    // Check abort condition 1: 3 failed recoveries
+    if (this.consecutiveFailedRecoveries >= MAX_RECOVERY_ATTEMPTS) {
+      this.stop();
+      const msg = `video stalled at t=${this.lastSeenMediaTime.toFixed(2)}s (aborted after ${MAX_RECOVERY_ATTEMPTS} failed recoveries)`;
+      this.callbacks.onStall?.(msg);
+      return;
+    }
+
+    // Check abort condition 2: 8 s with no progress
+    if (Date.now() - this.lastProgressTimestamp >= MAX_NO_PROGRESS_MS) {
+      this.stop();
+      const msg = `video stalled at t=${this.lastSeenMediaTime.toFixed(2)}s (aborted: no progress for 8s)`;
+      this.callbacks.onStall?.(msg);
+      return;
+    }
+
+    this.isRecovering = true;
+    this.callbacks.onRecovery?.(this.recoveryCount, true);
+
+    // Pause the video/sampler during recovery
+    try {
+      this.video.pause?.();
+    } catch {
+      // ignore
+    }
+
+    // Wait for canplay event or readyState >= 2/3 with timeout
+    const canPlayOk = await this.waitForCanPlay(2000);
+
+    if (!this.isRunning || this.userPaused || this.isCancelled) {
+      this.isRecovering = false;
+      return;
+    }
+
+    if (canPlayOk) {
+      try {
+        if (this.video.play) {
+          await this.video.play();
+        }
+        this.recoveryCount++;
+        this.consecutiveFailedRecoveries = 0;
+        this.isRecovering = false;
+        this.lastProgressTimestamp = Date.now();
+        this.callbacks.onRecovery?.(this.recoveryCount, false);
+
+        // Resume rVFC loop if needed
+        if (this.getMode() === "rvfc" && !this.rvfcHandle && this.video.requestVideoFrameCallback) {
+          this.rvfcHandle = this.video.requestVideoFrameCallback(() => {
+            this.startRvfc(true);
+          });
+        }
+      } catch {
+        this.consecutiveFailedRecoveries++;
+        this.isRecovering = false;
+        if (this.consecutiveFailedRecoveries >= MAX_RECOVERY_ATTEMPTS) {
+          this.stop();
+          const msg = `video stalled at t=${this.lastSeenMediaTime.toFixed(2)}s (aborted after ${MAX_RECOVERY_ATTEMPTS} failed recoveries)`;
+          this.callbacks.onStall?.(msg);
+        }
+      }
+    } else {
+      this.consecutiveFailedRecoveries++;
+      this.isRecovering = false;
+      if (this.consecutiveFailedRecoveries >= MAX_RECOVERY_ATTEMPTS) {
+        this.stop();
+        const msg = `video stalled at t=${this.lastSeenMediaTime.toFixed(2)}s (aborted after ${MAX_RECOVERY_ATTEMPTS} failed recoveries)`;
+        this.callbacks.onStall?.(msg);
+      }
+    }
+  }
+
+  private waitForCanPlay(timeoutMs = 3000): Promise<boolean> {
+    const video = this.video;
+    if (video.readyState !== undefined && video.readyState >= 3) {
+      return Promise.resolve(true);
+    }
+
+    return new Promise((resolve) => {
+      let resolved = false;
+      const timer = setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          video.removeEventListener("canplay", onCanPlay);
+          resolve(video.readyState !== undefined && video.readyState >= 2);
+        }
+      }, timeoutMs);
+
+      const onCanPlay = () => {
+        if (!resolved) {
+          resolved = true;
+          clearTimeout(timer);
+          video.removeEventListener("canplay", onCanPlay);
+          resolve(true);
+        }
+      };
+
+      video.addEventListener("canplay", onCanPlay);
+    });
   }
 
   /**
@@ -440,6 +606,7 @@ export class VideoClipSampler {
 
   public pause(): void {
     if (!this.isRunning) return;
+    this.userPaused = true;
     this.isPaused = true;
     this.isRunning = false;
     this.cleanupRvfc();
@@ -449,10 +616,12 @@ export class VideoClipSampler {
 
   public resume(): void {
     if (this.isRunning) return;
+    this.userPaused = false;
     this.start(true);
   }
 
   public cancel(): void {
+    this.userPaused = true;
     this.isCancelled = true;
     this.isRunning = false;
     this.isPaused = false;
@@ -472,6 +641,18 @@ export class VideoClipSampler {
       clearInterval(this.watchdogTimer);
       this.watchdogTimer = null;
     }
+    if (this.boundOnWaiting) {
+      this.video.removeEventListener("waiting", this.boundOnWaiting);
+      this.boundOnWaiting = null;
+    }
+    if (this.boundOnStalled) {
+      this.video.removeEventListener("stalled", this.boundOnStalled);
+      this.boundOnStalled = null;
+    }
+    if (this.boundOnPause) {
+      this.video.removeEventListener("pause", this.boundOnPause);
+      this.boundOnPause = null;
+    }
     if (this.rvfcHandle !== null && this.video.cancelVideoFrameCallback) {
       this.video.cancelVideoFrameCallback(this.rvfcHandle);
       this.rvfcHandle = null;
@@ -485,7 +666,115 @@ export class VideoClipSampler {
 export class DeterministicVideoStepper extends VideoClipSampler {}
 
 /**
- * Format decision logs into clean CSV without duplicates, including unique id and sample time.
+ * Bulk label action: mark all unlabeled decisions as correct (Req 2).
+ * - "alerted" rows -> "True alert"
+ * - "suppressed" rows -> "Correct silence"
+ * - "missed_hazard" rows -> "Should have alerted"
+ */
+export function markAllUnlabeledAsCorrect(decisions: TrackDecisionLog[]): TrackDecisionLog[] {
+  return decisions.map((d) => {
+    if (d.label && d.label.trim() !== "") {
+      return d;
+    }
+    if (d.decision === "alerted") {
+      return { ...d, label: "True alert" };
+    }
+    if (d.decision.startsWith("suppressed")) {
+      return { ...d, label: "Correct silence" };
+    }
+    if (d.decision === "missed_hazard") {
+      return { ...d, label: "Should have alerted" };
+    }
+    return d;
+  });
+}
+
+/**
+ * Metrics summary calculation (Req 2).
+ */
+export interface DecisionSummary {
+  trueAlerts: number; // TP
+  falseAlerts: number; // FP
+  correctSilences: number; // TN
+  missedHazards: number; // FN
+  unlabeled: number;
+  totalDecisions: number;
+  totalAlerts: number;
+  alertsPerMin: number;
+  precision: number; // TP / (TP + FP)
+  precisionPercent: string;
+  recall: number; // TP / (TP + FN)
+  recallPercent: string;
+}
+
+export function calculateDecisionSummary(
+  decisions: TrackDecisionLog[],
+  clipDurationSec: number
+): DecisionSummary {
+  let trueAlerts = 0;
+  let falseAlerts = 0;
+  let correctSilences = 0;
+  let missedHazards = 0;
+  let unlabeled = 0;
+  let totalAlerts = 0;
+
+  for (const d of decisions) {
+    const lbl = d.label;
+    if (d.decision === "alerted") {
+      totalAlerts++;
+      if (lbl === "True alert" || lbl === "True") {
+        trueAlerts++;
+      } else if (lbl === "False alert" || lbl === "False") {
+        falseAlerts++;
+      } else {
+        unlabeled++;
+      }
+    } else if (d.decision === "missed_hazard") {
+      missedHazards++;
+      if (!lbl) {
+        // Automatically considered "Should have alerted"
+      }
+    } else {
+      // Suppressed decisions
+      if (lbl === "Correct silence") {
+        correctSilences++;
+      } else if (lbl === "Should have alerted" || lbl === "Missed" || lbl === "missed") {
+        missedHazards++;
+      } else {
+        unlabeled++;
+      }
+    }
+  }
+
+  const durationMin = clipDurationSec > 0 ? clipDurationSec / 60 : 0;
+  const alertsPerMin = durationMin > 0 ? Math.round((totalAlerts / durationMin) * 10) / 10 : 0;
+
+  const precisionDenom = trueAlerts + falseAlerts;
+  const precision = precisionDenom > 0 ? trueAlerts / precisionDenom : 0;
+  const precisionPercent = precisionDenom > 0 ? `${(precision * 100).toFixed(1)}%` : "N/A";
+
+  const recallDenom = trueAlerts + missedHazards;
+  const recall = recallDenom > 0 ? trueAlerts / recallDenom : 0;
+  const recallPercent = recallDenom > 0 ? `${(recall * 100).toFixed(1)}%` : "N/A";
+
+  return {
+    trueAlerts,
+    falseAlerts,
+    correctSilences,
+    missedHazards,
+    unlabeled,
+    totalDecisions: decisions.length,
+    totalAlerts,
+    alertsPerMin,
+    precision: Math.round(precision * 1000) / 1000,
+    precisionPercent,
+    recall: Math.round(recall * 1000) / 1000,
+    recallPercent,
+  };
+}
+
+/**
+ * Format decision logs into clean CSV without duplicates, including unique id, sample time, and labels.
  */
 export function formatDecisionsToCsv(
   decisions: TrackDecisionLog[],
@@ -586,7 +875,7 @@ export function formatAlertsToCsv(
 }
 
 /**
- * Build a manual missed hazard log entry.
+ * Build a manual missed hazard log entry (Req 2).
  */
 export function createMissedHazardLog(
   clipName: string,
@@ -604,7 +893,7 @@ export function createMissedHazardLog(
     direction,
     decision: "missed_hazard",
     reason: `Manually marked missed ${hazardType} on ${direction}`,
-    label: "missed",
+    label: "Should have alerted",
     trackId: -1,
   };
 }

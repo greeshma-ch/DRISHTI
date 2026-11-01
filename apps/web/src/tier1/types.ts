@@ -91,16 +91,27 @@ export interface BenchmarkResult {
   error?: string;
 }
 
+export type DecisionLabel =
+  | "True alert"
+  | "False alert"
+  | "Correct silence"
+  | "Should have alerted"
+  | "True"
+  | "False"
+  | "Missed"
+  | "missed"
+  | "";
+
 export interface TrackDecisionLog {
   id: string;
   clip: string;
   t: number;
-  sample_time: number;
+  sample_time?: number;
   class: string;
   direction: Direction;
   decision: "alerted" | `suppressed: ${string}` | "missed_hazard";
   reason: string;
-  label?: "True" | "False" | "Missed" | "missed" | "";
+  label?: DecisionLabel;
   trackId: number;
 }
 

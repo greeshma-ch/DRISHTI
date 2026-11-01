@@ -258,8 +258,9 @@ export class Tier1Detector {
       (async () => {
         try {
           // Downscale to inputSize (default 320, 256 for slower phones)
+          // Frame capture with resizeWidth <= 320 so full-resolution frame is never copied
           const inputSize = this.config.inputSize ?? 320;
-          const targetWidth = Math.min(inputSize, width);
+          const targetWidth = Math.min(inputSize, Math.min(320, width));
           const targetHeight = Math.round((height / width) * targetWidth);
           const bitmap = await createImageBitmap(source, {
             resizeWidth: targetWidth,
