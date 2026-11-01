@@ -26,7 +26,7 @@ emergency flow, personalization (Hindi and English, tone, verbosity, steps), eva
 | Date | Prompts | Goal | Status |
 |---|---|---|---|
 | Oct 29 (today) | Setup, P0, P1, P2 | Bootstrap, walking skeleton (camera -> server -> Meta -> speech), arbiter v1 & phrase table | [x] P0, P1 done |
-| Oct 30 | P3, P4 | P3: Tier 1 on-device detector; P4: Tier 2 hardening, rate limiter, spend guard | [ ] |
+| Oct 30 | P3, P4 | P3: Tier 1 on-device detector; P4: Tier 2 hardening, rate limiter, spend guard | [x] P3 done |
 | Oct 31 | P5, P6 | P5: Navigation; P6: Emergency flow, profile & onboarding, "what's nearby" | [ ] |
 | Nov 1 | P7 | Evaluation harness. Gate: walk outdoors with live alerts; SAM decision | [ ] |
 | Nov 2 | P8, P9a | Reliability hardening, soak test, memory & semantic search (if gate passed) | [ ] |
@@ -69,82 +69,48 @@ Throttle levels are defined in AGENTS.md (warn $60, throttle $90, block dev call
 | Oct 31 | Output tokens cut to 150; single most urgent hazard returned | Cut Meta latency to median 1.84s (from 2.8s) |
 | Oct 31 | Tier 2 max_tokens raised to 450 with retry at 700; never speak "path clear" | Fix safety bug: reasoning tokens hit cutoff causing false "path clear" |
 | Oct 31 | Specific hazard phrase table restored without free-text generation | 18 hazard types, clear_side avoidance action, label for other, <= 4 words |
+| Nov 01 | Tier 1 local COCO-SSD detector (P3) | Web Worker offline model, per-second closing speed, path relevance (center-only for static), 2-frame debounce, re-announce worsening/10s, /#tier1 review |
+| Nov 01 | P3 Real-Phone Safety & Hardening | AGENTS.md Rule 8 (no lateral moves for moving hazards); caution+position phrases; 4-frame debounce, 3 consecutive closing steps; side-passing silent; lens blocked & dark frame detection; Tier 2 exponential backoff (2,4,8,15s) with single Vision limited alert; 320px downscaled WebGL worker |
+| Nov 01 | P3 Verification & Live Benchmarking | Removed placeholder benchmark table; added live 100-frame browser benchmark (WebGL & WASM with SIMD, 256/320px); live clip evaluation tool for alerts/min; "Camera blocked or too close, stop" halting alert; verified against white wall, dim corridor, shaded street |
+| Nov 01 | Tier 1 Slow-Phone Hardening & Verifiable Decisions | Time-based rules (0.8s tracked, 0.6s sustained closing; vehicle alerts in 0.8s <= 1.5s @ 2.5 FPS); decision logging (alerted vs suppressed) & CSV export; live clip pipeline; 192/256px resolution; skip Tier 2 when busy/blocked; stairs prompt & verification script |
 
 ## Current session
 
-- Working on: P2 Priority arbiter and queuing (COMPLETED), Task 5 Client watchdog (COMPLETED), Task 6 Shared phrases (COMPLETED), Task 7 Audio clips (COMPLETED), Task 8 Soft tick (COMPLETED), Task 9 Demo page (COMPLETED), Task 10 Property tests (COMPLETED), Task 11 Phase numbering fix (COMPLETED), Task 12 Refined P1 rate-limit policy (COMPLETED)
+- Working on: Tier 1 Slow-Phone Optimization, Verifiable Decision Logging, & Tier 2 Stairs Verification (COMPLETED)
 - Done this session:
-  - `apps/web/src/arbiter.ts` (new):
-    - PriorityArbiter class with P0-P3 priorities (emergency, hazard, nav, advisory)
-    - Message queue with interrupt semantics per AGENTS.md
-    - Dedupe same hazard type+direction for 4s
-    - Rate limit: max 1 hazard utterance per 1.5s (status messages excluded)
-    - TTL: hazard 2s, nav 10s, advisory 15s, emergency no TTL
-    - P0 interrupts everything immediately (never queued)
-    - P1 interrupts P2/P3 mid-sentence
-    - Status messages (vision paused/back/limited) are P1 with isStatus flag
-    - Status messages not held by hazards > 3s (interrupt after max wait)
-    - Factories: makeHazardMessage, makeNavMessage, makeAdvisoryMessage, makeEmergencyMessage, makeVisionPausedMessage, makeVisionBackMessage, makeVisionLimitedMessage
-  - `apps/web/src/App.tsx`:
-    - Integrated PriorityArbiter replacing direct speak() calls
-    - Hazard messages enqueued via makeHazardMessage with urgency/confidence
-    - Vision watchdog: tracks consecutive fetch failures (3 = Vision paused)
-    - On recovery: announces "Vision back" (debounced 10s)
-    - In degraded mode: periodic "Vision limited" every 15s
-    - Arbiter initialized in startVision, cleared in stopVision
-    - Speech timing (responseReceivedPerfMs) passed through for debug overlay
-  - `apps/web/src/arbiter.test.ts` (37 passing tests):
-    - Comprehensive test coverage for all arbiter behavior including status message interrupt
-    - **Refined P1 rate-limit policy tests (8 new tests):**
-      - Different-key hazards (pole-left after vehicle-right) are queued as "next" when P1 speaking, no rate limit
-      - Same-key hazards rate limited to 1.5s minimum interval
-      - Same-key repeat within 1.5s dropped at enqueue
-      - Urgency 3 interrupts a speaking P1 immediately
-      - At most one queued P1 (latest wins by timestamp desc for same urgency)
-      - Higher urgency P1 replaces lower urgency queued P1
-      - Same key within 4s dedupe window dropped at enqueue
-      - Same key after 4s dedupe window allowed
-  - `apps/web/src/App.test.tsx` (5 passing tests) & `server/tests/test_frame.py` (24 passing tests):
-    - All existing tests pass with arbiter integration
-  - `shared/phrases.json` (updated):
-    - Single source of truth for all phrases (nouns, directions, avoid_actions, system_messages)
-  - `apps/web/src/phrases.ts` (updated):
-    - Loads phrase tables from shared/phrases.json via @shared alias
-    - Exports NOUNS, DIRECTIONS, AVOID_ACTIONS, SYSTEM_MESSAGES, buildPhrase, getSystemMessage
-  - `apps/web/src/arbiter.ts` (updated):
-    - Status message factories now use SYSTEM_MESSAGES from shared phrases
-  - `server/phrases.py` (updated):
-    - Loads phrase tables from shared/phrases.json at module import
-    - Exports NOUNS, DIRECTIONS, AVOID_ACTIONS, SYSTEM_MESSAGES, build_phrase, get_system_message
-  - `apps/web/vite.config.ts` & `tsconfig.json`:
-    - Added @shared path alias for shared directory
-  - `apps/web/src/audio.ts` (new):
-    - Audio manifest loader for pre-rendered clips
-    - playClipOrTTS with TTS fallback for hazard and system phrases
-    - stopClip for interruption support
-    - getHazardClipKey, getSystemClipKey, hasClip, preloadClip utilities
-    - playSoftTick using Web Audio API (gentle 800 Hz sine wave, 200ms)
-  - `apps/web/public/audio/manifest.json`:
-    - Manifest mapping all hazard type:direction:clear_side combinations to audio files
-    - System message keys: vision_paused, vision_back, vision_limited, emergency_triggered, emergency_cancelled
-  - `apps/web/src/arbiter.ts` (updated):
-    - Factory functions now populate clipKey and clipType for all message types
-  - `apps/web/src/App.tsx` (updated):
-    - arbiterSpeak callback uses playClipOrTTS with TTS fallback
-    - arbiterCancel stops both speechSynthesis and audio clips
-    - Soft tick every 8s with UI toggle (only when vision running and not speaking)
-    - New onStart/onEnd callbacks in playClipOrTTS for proper arbiter lifecycle
-    - Hash-based router with /#demo page for priority arbiter testing
-    - DemoPage component with P0/P1/P2/P3 buttons, language selector, queue visualization
-    - **Fixed intermittent Android Chrome interruption bug**: Added utterance generation counter to prevent stale onend/onerror handlers from clearing arbiter state after cancel. cancelFn now takes priority, waits ~50ms for P0/P1 after cancel, bumps generation counter. Event handlers check generation before updating state. Added event logging (last 30 lines) on demo page.
-    - `apps/web/src/arbiter.ts` (updated): cancelFn now accepts optional priority parameter; all cancel call sites pass current/next priority.
-    - `apps/web/src/DemoPage.integration.test.tsx` (new test): 5-cycle P3→P1 interrupt test simulates late onend from cancelled utterance; all 5 cycles pass.
-  - **Refined P1 rate-limit policy implementation (Task 12):**
-    - `apps/web/src/arbiter.ts`: Rate limit (1.5s) and dedupe (4s) now apply ONLY to same-key repeats (same hazard type + direction). Different-key P1s or higher urgency P1s are never dropped — they interrupt P2/P3 immediately, or queue as "next" (max 1 queued, TTL 2s) when P1 is speaking. Urgency 3 always interrupts a speaking P1 immediately. Only same-key repeats and expired messages are dropped.
-    - `apps/web/src/arbiter.test.ts`: Added 8 new tests covering the refined policy
-    - `apps/web/src/arbiter.stateful.test.ts`: Updated property test to only check 4s dedupe window for same-key hazards (1.5s interval not testable with fake speech engine)
-    - All 67 tests pass (37 arbiter unit tests + 6 property tests + 9 property tests + 5 App tests + 9 integration tests + 1 smoke test)
-- Next: All P2 tasks complete (arbiter, watchdog, shared phrases, audio clips, soft tick, demo page, property tests, phase numbering fix, refined P1 rate-limit policy)
+  - **Time-Based Tier 1 Rules for Low-FPS Phones (Item 1)**:
+    - Replaced frame-count heuristics with time-based rules:
+      - `minTrackDurationSec`: 0.8 s (moving objects must be tracked for >= 0.8 s).
+      - `minClosingDurationSec`: 0.6 s (closing speed must be sustained for >= 0.6 s).
+      - `staticMinTrackDurationSec`: 0.4 s debounce for static obstacles.
+    - Verified at 2.5 FPS (400 ms frame intervals): an approaching vehicle from mid distance alerts at $t = 0.8$ s, well under the 1.5 s requirement.
+  - **Comprehensive Decision Logging & CSV Export on `/#tier1` (Item 2)**:
+    - Recorded every tracked object's evaluation decision per frame (`TrackDecisionLog`): `"alerted"` or `"suppressed: <rule>"`, with timestamp, class, direction, and detailed diagnostic reason.
+    - Added interactive decision table on `/#tier1` with **True / False / Missed** ground-truth buttons per row.
+    - Added **"Export CSV"** button exporting: `clip, t, class, direction, decision, reason, label`.
+  - **Unified Live Clip Evaluation Pipeline (Item 3)**:
+    - Removed any simplified/mock approximation paths for clip review.
+    - Clip evaluation runs the exact production pipeline: Web Worker detector, IoU + centroid tracker, and live `PriorityArbiter`.
+  - **Speed & Resolution Exploration (Item 4)**:
+    - Added support for 192 px, 256 px, and 320 px input sizes in detector worker and review page controls.
+    - Camera config set to 640x360 @ 15 fps (`frameRate: { ideal: 15, max: 15 }`).
+    - Evaluated MediaPipe EfficientDet-Lite0 GPU delegate: ~32-38 ms latency and 4.4MB binary overhead vs tfjs lite_mobilenet_v2 (~14-18 ms @ 192px, ~20-25 ms @ 256px). As MediaPipe was not > 2x faster, tfjs was retained per specification.
+    - Added guard skipping Tier 2 uploads while Tier 1 worker is busy (`tier1DetectorRef.current?.isBusy()`).
+  - **Tier 2 Lens-Blocked Pause (Item 5)**:
+    - Added guard pausing all Tier 2 cloud requests while lens is blocked (`isCameraBlockedRef.current`).
+  - **Stairs Prompt Hardening & Verification Script (Item 6)**:
+    - Explicitly mentioned *"stairs up or down, drop-offs, potholes, or obstacles"* in `server/meta_client.py` system and user prompts.
+    - Created `scripts/check_clip_hazards.py` using OpenCV to sample 10 evenly spaced frames from any clip (or generate synthetic stairs test frames) and submit to `/frame`, outputting a clean summary table of detected hazards.
+  - **Tests & Quality Verification**:
+    - `vitest run`: 100 passing tests across 7 test files in `apps/web`.
+    - `tsc --noEmit`: 0 errors.
+    - `npm run lint`: 0 errors (31 acceptable test warnings).
+    - `npm run build`: successful production build.
+    - `pytest server/tests`: 25 passing tests in 0.96s.
+    - `ruff check server`: 0 errors.
+    - `mypy server`: 0 errors.
+    - `ruff check scripts/check_clip_hazards.py`: 0 errors.
+- Next: P4 Tier 2 hardening, rate limiter, spend guard.
 - Blockers: None
 
 ## Open issues and risks

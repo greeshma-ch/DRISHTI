@@ -1,6 +1,6 @@
 /** Priority Arbiter tests — pure logic, no DOM. */
 
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   PriorityArbiter,
   makeHazardMessage,
@@ -10,6 +10,9 @@ import {
   makeVisionPausedMessage,
   makeVisionBackMessage,
   makeVisionLimitedMessage,
+  makeVisionLimitedMovingOnlyMessage,
+  makeCameraBlockedMessage,
+  makeCameraClearMessage,
 } from "./arbiter";
 
 describe("PriorityArbiter", () => {
@@ -325,10 +328,45 @@ describe("Message factories", () => {
     expect(msg.text).toBe("Vision limited");
   });
 
+  it("makeVisionLimitedMovingOnlyMessage creates P1 status with correct key and text", () => {
+    const msgEn = makeVisionLimitedMovingOnlyMessage("en");
+    expect(msgEn.priority).toBe(1);
+    expect(msgEn.key).toBe("status:vision_limited_moving_only");
+    expect(msgEn.isStatus).toBe(true);
+    expect(msgEn.text).toBe("Vision limited, moving-object alerts only");
+
+    const msgHi = makeVisionLimitedMovingOnlyMessage("hi");
+    expect(msgHi.text).toBe("दृष्टि सीमित, केवल गतिमान वस्तुएँ");
+  });
+
+  it("makeCameraBlockedMessage creates P1 status with halt instruction (Req Item 5)", () => {
+    const msgEn = makeCameraBlockedMessage("en");
+    expect(msgEn.priority).toBe(1);
+    expect(msgEn.key).toBe("status:camera_blocked");
+    expect(msgEn.isStatus).toBe(true);
+    expect(msgEn.text).toBe("Camera blocked or too close, stop");
+
+    const msgHi = makeCameraBlockedMessage("hi");
+    expect(msgHi.text).toBe("कैमरा बंद या बहुत पास, रुकें");
+  });
+
+  it("makeCameraClearMessage creates P1 status with correct key and text", () => {
+    const msgEn = makeCameraClearMessage("en");
+    expect(msgEn.priority).toBe(1);
+    expect(msgEn.key).toBe("status:camera_clear");
+    expect(msgEn.isStatus).toBe(true);
+    expect(msgEn.text).toBe("Camera clear");
+
+    const msgHi = makeCameraClearMessage("hi");
+    expect(msgHi.text).toBe("कैमरा साफ़");
+  });
+
   it("status messages have Hindi variants", () => {
     expect(makeVisionPausedMessage("hi").text).toBe("दृष्टि रुकी");
     expect(makeVisionBackMessage("hi").text).toBe("दृष्टि वापस");
     expect(makeVisionLimitedMessage("hi").text).toBe("दृष्टि सीमित");
+    expect(makeCameraBlockedMessage("hi").text).toBe("कैमरा बंद या बहुत पास, रुकें");
+    expect(makeCameraClearMessage("hi").text).toBe("कैमरा साफ़");
   });
 });
 
@@ -430,7 +468,7 @@ describe("Refined P1 rate-limit policy", () => {
     arbiter.enqueue(msg1);
     expect(speakFn).toHaveBeenCalledTimes(1);
     const firstCall = speakFn.mock.calls[0];
-    expect(firstCall[0]).toBe("Vehicle right");
+    expect(firstCall![0]).toBe("Vehicle right");
 
     // Simulate speech start
     arbiter.onSpeechStart(1);

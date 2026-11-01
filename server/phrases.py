@@ -1,7 +1,9 @@
 """Fixed phrase table for P1 hazard alerts — English and Hindi (AGENTS.md rule).
 
 Hard Rule 1: Never claim a path or crossing is safe. Report detections only.
-All phrases are 4 words or fewer: action + direction or detection + avoid action.
+Hard Rule 8: Never instruct a lateral move (step left/right) for vehicles, people,
+bicycles or animals. Moving things get a caution word plus position.
+All phrases are 4 words or fewer.
 """
 
 from __future__ import annotations
@@ -19,6 +21,10 @@ NOUNS: dict[str, dict[str, str]] = _PHRASES["nouns"]
 DIRECTIONS: dict[str, dict[str, str]] = _PHRASES["directions"]
 AVOID_ACTIONS: dict[str, dict[str, str]] = _PHRASES["avoid_actions"]
 SYSTEM_MESSAGES: dict[str, dict[str, str]] = _PHRASES["system_messages"]
+MOVING_HAZARDS: set[str] = set(
+    _PHRASES.get("moving_hazards", ["vehicle", "person", "bicycle", "animal", "rickshaw"])
+)
+CAUTION_ACTIONS: dict[str, dict[str, str]] = _PHRASES.get("caution_actions", {})
 
 
 def build_phrase(
@@ -31,6 +37,7 @@ def build_phrase(
     """Build a fixed alert phrase of <= 4 words in Hindi or English.
 
     Hard Rule 1: Never returns 'path clear' or implies safety.
+    Hard Rule 8: Never instruct a lateral move for moving objects.
     Returns '' if no hazard.
     """
     if not hazard_type:
@@ -48,6 +55,19 @@ def build_phrase(
         noun = noun_info[lang_code]
 
     dir_code = str(direction).lower().strip()
+    if dir_code not in DIRECTIONS:
+        dir_code = "center"
+
+    # 2. Moving hazard (Hard Rule 8: Caution word plus position; NO steering)
+    if h_type in MOVING_HAZARDS:
+        if dir_code == "center":
+            return f"{noun} आगे, रुकें" if lang_code == "hi" else f"{noun} ahead, stop"
+        elif dir_code == "left":
+            return f"{noun} बाएँ, सावधान" if lang_code == "hi" else f"{noun} on left, careful"
+        elif dir_code == "right":
+            return f"{noun} दाएँ, सावधान" if lang_code == "hi" else f"{noun} on right, careful"
+
+    # 3. Static obstacle: steering allowed only if clear_side provided
     dir_info = DIRECTIONS.get(dir_code, DIRECTIONS["center"])
     dir_word = dir_info[lang_code]
 
@@ -70,7 +90,7 @@ def build_phrase(
 
 
 def get_system_message(key: str, lang: str = "en") -> str:
-    """Get a system message (vision_paused, vision_back, vision_limited, etc.) in the given language."""
+    """Get a system message in the given language."""
     msg = SYSTEM_MESSAGES.get(key)
     if not msg:
         return ""

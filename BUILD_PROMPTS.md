@@ -163,17 +163,25 @@ Phone check: listen to every Hindi phrase and mark the ones that sound wrong. Ge
 ```
 Read AGENTS.md and PROGRESS.md first. Plan first and wait for my OK.
 
-Add the on-device moving-object detector. Use TensorFlow.js COCO-SSD (or onnxruntime-web with YOLOv8n if
-you can justify it) inside a Web Worker. Cap the frame rate adaptively (target 5 to 10 fps, lower on a slow
-phone). Track only: person, bicycle, car, motorcycle, bus, truck, dog, cow. Direction = left, center or right
-third by bounding-box center. Closing speed = smoothed growth of bounding-box area over the last 3 frames.
-Emit hazard events {type, direction, urgency 1-3} into the arbiter using the phrase table. Thresholds and
-cooldowns live in a config file. Measure and show detector FPS and per-frame latency in the debug overlay.
-If the model fails to load, speak the offline-detector message and continue without Tier 1.
-Cache the model with the service worker later (P8); for now just load it.
-
-Acceptance: walking toward a person or a parked vehicle triggers an alert in under 300 ms in the logs; a
-static far-away object does not; unit tests cover the direction and closing-speed math with fixtures.
+Add the on-device Tier 1 detector. Use TensorFlow.js COCO-SSD (or onnxruntime-web with YOLOv8n if you can justify
+it) inside a Web Worker. Cap the frame rate adaptively (target 5 to 10 fps, lower on a slow phone).
+- Classes: person, bicycle, car, motorcycle, bus, truck, dog, cow, chair, bench, couch, dining table, potted
+  plant, fire hydrant, suitcase. Map COCO names to our hazard enum (chair, table, bench, vehicle, bicycle,
+  person, animal, other).
+- Direction: left, center or right third by bounding-box center.
+- Proximity: bounding-box height as a fraction of the frame, classified near, mid or far with thresholds in a
+  config file.
+- Closing speed: smoothed growth of bounding-box area over the last 3 frames.
+- Emit hazard events {type, direction, distance, urgency 1-3} into the existing arbiter, using phrases from
+  shared/phrases.json. Use the same dedupe key (type + direction) as Tier 2, so a hazard already announced by
+  Tier 1 is not repeated by Tier 2 within 4 s.
+- Show detector FPS and per-frame latency in the debug overlay. If the model fails to load, speak the
+  detector-unavailable message and continue without Tier 1.
+- Add a /#tier1 page with a file picker: I choose a video clip from my phone or laptop, it plays with bounding
+  boxes and the alerts that would fire, so I can test on real footage.
+- Standing still facing a static far-away object must produce no alerts.
+Tests: fixtures for direction, proximity and closing-speed math, and the shared-key dedupe with Tier 2.
+Acceptance: walking toward a person or chair triggers an alert in under 300 ms in the logs.
 ```
 
 Phone check: stand still facing traffic and confirm there are no false alarms; then walk toward a parked vehicle.

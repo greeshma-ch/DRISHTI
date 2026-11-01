@@ -28,6 +28,12 @@ Judged on creativity, technical ambition, and whether it works. Deadline: Nov 4,
    Never call the API directly from anywhere else.
 7. **Use the Standard model tier for any real street footage.** The Contributor tier trains on
    prompts; use it only for non-personal test frames (empty rooms, no faces), if at all.
+8. **Never instruct a lateral move (step left/right) for vehicles, people, bicycles or animals.**
+   Steering words are allowed only for static obstacles (chair, table, bench, pole, plant, bag) and
+   only when Tier 2 reports clear_side with no person or vehicle on that side. Moving things get a caution
+   word plus position.
+9. **Never report benchmark, accuracy or eval numbers that were not produced by running code on the stated device.**
+   Label any estimate as an estimate.
 
 ## Architecture
 

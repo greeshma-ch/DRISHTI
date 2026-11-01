@@ -20,7 +20,7 @@ from server.meta_client import (
     record_spend,
     reset_parse_failures,
 )
-from server.phrases import build_phrase
+from server.phrases import build_phrase, get_system_message
 
 
 def test_parse_perception_valid() -> None:
@@ -526,3 +526,23 @@ def test_expanded_hazard_types_and_clear_sides() -> None:
         assert len(phrase_en.split()) <= 4
         assert phrase_hi != ""
         assert phrase_en != ""
+
+
+def test_system_messages_camera_blocked_and_clear() -> None:
+    # Camera blocked or too close, stop (Req Item 5)
+    assert get_system_message("camera_blocked", lang="en") == "Camera blocked or too close, stop"
+    assert get_system_message("camera_blocked", lang="hi") == "कैमरा बंद या बहुत पास, रुकें"
+
+    # Camera clear
+    assert get_system_message("camera_clear", lang="en") == "Camera clear"
+    assert get_system_message("camera_clear", lang="hi") == "कैमरा साफ़"
+
+    # Vision limited moving only
+    assert (
+        get_system_message("vision_limited_moving_only", lang="en")
+        == "Vision limited, moving-object alerts only"
+    )
+    assert (
+        get_system_message("vision_limited_moving_only", lang="hi")
+        == "दृष्टि सीमित, केवल गतिमान वस्तुएँ"
+    )

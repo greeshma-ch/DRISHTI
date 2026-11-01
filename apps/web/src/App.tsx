@@ -6,11 +6,17 @@ import {
   makeAdvisoryMessage,
   makeVisionPausedMessage,
   makeVisionBackMessage,
-  makeVisionLimitedMessage,
+  makeDetectorUnavailableMessage,
+  makeCameraBlockedMessage,
+  makeCameraClearMessage,
+  makeVisionLimitedMovingOnlyMessage,
   makeEmergencyMessage,
   makeNavMessage,
   type ArbiterMessage,
 } from "./arbiter";
+import { Tier1Detector } from "./tier1/detector";
+import { Tier1Metrics } from "./tier1/types";
+import { Tier1ReviewPage } from "./tier1/Tier1ReviewPage";
 import { playClipOrTTS, stopClip, playSoftTick } from "./audio";
 
 interface HazardItem {
@@ -91,6 +97,10 @@ const waitForVoices = (timeoutMs = 5000): Promise<SpeechSynthesisVoice[]> => {
 
 function MainApp() {
   const [isRunning, setIsRunning] = useState(false);
+  const isRunningRef = useRef(false);
+  useEffect(() => {
+    isRunningRef.current = isRunning;
+  }, [isRunning]);
   const [lang, setLang] = useState<"en" | "hi">(() => {
     if (typeof window !== "undefined") {
       const saved = localStorage.getItem("drishti-lang");
@@ -119,6 +129,16 @@ function MainApp() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const inFlightRef = useRef<number>(0);
   const isPendingPreviousRef = useRef<boolean>(false);
+  const [tier1Metrics, setTier1Metrics] = useState<Tier1Metrics>({
+    fps: 0,
+    latencyMs: 0,
+    backend: "idle",
+    loadTimeMs: 0,
+    status: "idle",
+  });
+  const tier1DetectorRef = useRef<Tier1Detector | null>(null);
+  const tier1IntervalIdRef = useRef<number | null>(null);
+
   const intervalIdRef = useRef<number | null>(null);
   const hiVoiceRef = useRef<SpeechSynthesisVoice | null>(null);
   const enVoiceRef = useRef<SpeechSynthesisVoice | null>(null);
@@ -130,6 +150,10 @@ function MainApp() {
   const isVisionDegradedRef = useRef<boolean>(false);
   const visionLimitedIntervalRef = useRef<number | null>(null);
   const lastVisionBackRef = useRef<number>(0);
+  const isCameraBlockedRef = useRef<boolean>(false);
+  const lastTier2HazardRef = useRef<{ type: string; direction: string; distance: string } | null>(null);
+  const tier2LastAnnouncedMapRef = useRef<Map<string, { time: number; distance: string }>>(new Map());
+  const tier2BackoffTimeoutRef = useRef<number | null>(null);
 
   // Utterance generation counter — prevents stale onend/onerror from clearing state
   const utteranceGenRef = useRef<number>(0);
@@ -245,6 +269,16 @@ function MainApp() {
       return;
     }
 
+    // Requirement 5: Pause all Tier 2 requests while the lens is blocked
+    if (isCameraBlockedRef.current) {
+      return;
+    }
+
+    // Requirement 4: Skip Tier 2 uploads while Tier 1 is busy
+    if (tier1DetectorRef.current?.isBusy()) {
+      return;
+    }
+
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
@@ -321,15 +355,13 @@ function MainApp() {
           setSessionCost((prev) => +(prev + cost).toFixed(6));
           setStatusMsg("Active");
 
-          // Vision watchdog: recovery from degraded mode
-          if (consecutiveFailuresRef.current >= 3 && isVisionDegradedRef.current) {
+          // Requirement D9: Vision watchdog recovery from degraded mode
+          if (isVisionDegradedRef.current) {
             isVisionDegradedRef.current = false;
             consecutiveFailuresRef.current = 0;
-
-            // Clear periodic "Vision limited" interval
-            if (visionLimitedIntervalRef.current) {
-              clearInterval(visionLimitedIntervalRef.current);
-              visionLimitedIntervalRef.current = null;
+            if (tier2BackoffTimeoutRef.current) {
+              clearTimeout(tier2BackoffTimeoutRef.current);
+              tier2BackoffTimeoutRef.current = null;
             }
 
             // Announce "Vision back" (debounced: not more than once per 10s)
@@ -339,8 +371,12 @@ function MainApp() {
               const backMsg = makeVisionBackMessage(lang);
               arbiterRef.current?.enqueue(backMsg);
             }
-          } else if (consecutiveFailuresRef.current > 0) {
-            // Reset failure counter on any successful response
+
+            // Resume normal 2000ms cadence
+            if (isRunningRef.current && !intervalIdRef.current) {
+              intervalIdRef.current = window.setInterval(captureAndSendFrame, 2000);
+            }
+          } else {
             consecutiveFailuresRef.current = 0;
           }
 
@@ -368,6 +404,42 @@ function MainApp() {
             setDurations({ ...currentDurations });
             return;
           }
+
+          // Requirement B6: Suppress hazard speech while camera is blocked
+          if (isCameraBlockedRef.current) {
+            return;
+          }
+
+          // Requirement B7: Tier 2 results for a frame older than 3s, or nearly identical to the previous result,
+          // must not re-announce the same key within 10s unless the distance gets worse.
+          const isStale = ageSec > 3.0;
+          const isNearlyIdentical =
+            lastTier2HazardRef.current !== null &&
+            lastTier2HazardRef.current.type === urgentHazard.type &&
+            lastTier2HazardRef.current.direction === urgentHazard.direction &&
+            lastTier2HazardRef.current.distance === urgentHazard.distance;
+
+          if (isStale || isNearlyIdentical) {
+            const hazardKey = `hazard:${urgentHazard.type}:${urgentHazard.direction}`;
+            const lastRecord = tier2LastAnnouncedMapRef.current.get(hazardKey);
+            const now = Date.now();
+            if (lastRecord && now - lastRecord.time < 10000) {
+              const sevMap: Record<string, number> = { far: 1, mid: 2, near: 3 };
+              const currentSev = sevMap[urgentHazard.distance] ?? 1;
+              const lastSev = sevMap[lastRecord.distance] ?? 1;
+              if (currentSev <= lastSev) {
+                currentDurations.responseToSpeechStart = "suppressed (stale/identical within 10s)";
+                setDurations({ ...currentDurations });
+                return;
+              }
+            }
+            tier2LastAnnouncedMapRef.current.set(hazardKey, { time: now, distance: urgentHazard.distance });
+          }
+          lastTier2HazardRef.current = {
+            type: urgentHazard.type,
+            direction: urgentHazard.direction,
+            distance: urgentHazard.distance,
+          };
 
           // 2. Result older than 3s is spoken ONLY for hazards with distance "near" or "mid"
           if (ageSec > 3.0) {
@@ -400,24 +472,31 @@ function MainApp() {
             );
             arbiterRef.current?.enqueue(hazardMsg);
           }
-        } catch (err) {
-          // Track consecutive failures for vision watchdog
+        } catch {
+          // Requirement D9: Backoff (2, 4, 8, then 15s max) instead of retrying continuously
           consecutiveFailuresRef.current += 1;
-          setStatusMsg(`Request error (${consecutiveFailuresRef.current}/3): ${err instanceof Error ? err.message : String(err)}`);
+          const backoffSchedule = [2000, 4000, 8000, 15000];
+          const backoffDelay =
+            backoffSchedule[Math.min(consecutiveFailuresRef.current - 1, backoffSchedule.length - 1)] ?? 15000;
+          setStatusMsg(`Request error (${consecutiveFailuresRef.current}): retrying in ${backoffDelay / 1000}s`);
 
-          // After 3 consecutive failures: Vision paused
-          if (consecutiveFailuresRef.current === 3 && !isVisionDegradedRef.current) {
+          // Speak ONE "Vision limited, moving-object alerts only" message (not repeated status churn)
+          if (!isVisionDegradedRef.current) {
             isVisionDegradedRef.current = true;
-            const pausedMsg = makeVisionPausedMessage(lang);
-            arbiterRef.current?.enqueue(pausedMsg);
+            const limitedMsg = makeVisionLimitedMovingOnlyMessage(lang);
+            arbiterRef.current?.enqueue(limitedMsg);
+          }
 
-            // Start periodic "Vision limited" announcements every 15s
-            visionLimitedIntervalRef.current = window.setInterval(() => {
-              if (isVisionDegradedRef.current) {
-                const limitedMsg = makeVisionLimitedMessage(lang);
-                arbiterRef.current?.enqueue(limitedMsg);
-              }
-            }, 15000);
+          // Reschedule next attempt with exponential backoff delay
+          if (isRunningRef.current) {
+            if (intervalIdRef.current) {
+              clearInterval(intervalIdRef.current);
+              intervalIdRef.current = null;
+            }
+            if (tier2BackoffTimeoutRef.current) {
+              clearTimeout(tier2BackoffTimeoutRef.current);
+            }
+            tier2BackoffTimeoutRef.current = window.setTimeout(captureAndSendFrame, backoffDelay);
           }
         } finally {
           isPendingPreviousRef.current = false;
@@ -472,6 +551,57 @@ function MainApp() {
 
       // Initialize priority arbiter
       arbiterRef.current = new PriorityArbiter(arbiterSpeak, arbiterCancel);
+      // Start Tier 1 on-device detector
+      try {
+        const detector = new Tier1Detector();
+        tier1DetectorRef.current = detector;
+        detector.onMetrics((m) => {
+          setTier1Metrics(m);
+        });
+        detector.onAlert((alert) => {
+          if (isCameraBlockedRef.current) return;
+          const phrase = buildPhrase(
+            {
+              type: alert.type,
+              direction: alert.direction,
+              clear_side: alert.clear_side,
+              label: alert.label,
+            },
+            lang
+          );
+          if (phrase) {
+            setLastSpoken(phrase);
+            arbiterRef.current?.enqueue(
+              makeHazardMessage(
+                alert.type,
+                alert.direction,
+                phrase,
+                lang,
+                alert.urgency,
+                alert.confidence,
+                performance.now(),
+                alert.clear_side
+              )
+            );
+          }
+        });
+        detector.onError(() => {
+          arbiterRef.current?.enqueue(makeDetectorUnavailableMessage(lang));
+        });
+        detector.onCameraBlocked(() => {
+          isCameraBlockedRef.current = true;
+          arbiterRef.current?.clear();
+          arbiterRef.current?.enqueue(makeCameraBlockedMessage(lang));
+        });
+        detector.onCameraClear(() => {
+          isCameraBlockedRef.current = false;
+          arbiterRef.current?.enqueue(makeCameraClearMessage(lang));
+        });
+        detector.start();
+      } catch (tier1Err) {
+        console.warn("[Tier1] Init error:", tier1Err);
+      }
+
 
       setStatusMsg("Starting camera...");
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -479,6 +609,7 @@ function MainApp() {
           facingMode: { ideal: "environment" },
           width: { ideal: 640 },
           height: { ideal: 360 },
+          frameRate: { ideal: 15, max: 15 },
         },
         audio: false,
       });
@@ -517,6 +648,13 @@ function MainApp() {
   };
 
   const stopVision = () => {
+    if (tier1IntervalIdRef.current) {
+      clearInterval(tier1IntervalIdRef.current);
+      tier1IntervalIdRef.current = null;
+    }
+    tier1DetectorRef.current?.stop();
+    tier1DetectorRef.current = null;
+
     if (intervalIdRef.current) {
       clearInterval(intervalIdRef.current);
       intervalIdRef.current = null;
@@ -526,6 +664,13 @@ function MainApp() {
       clearInterval(visionLimitedIntervalRef.current);
       visionLimitedIntervalRef.current = null;
     }
+    if (tier2BackoffTimeoutRef.current) {
+      clearTimeout(tier2BackoffTimeoutRef.current);
+      tier2BackoffTimeoutRef.current = null;
+    }
+    isCameraBlockedRef.current = false;
+    lastTier2HazardRef.current = null;
+    tier2LastAnnouncedMapRef.current.clear();
     if (videoRef.current && videoRef.current.srcObject) {
       const stream = videoRef.current.srcObject as MediaStream;
       stream.getTracks().forEach((track) => track.stop());
@@ -551,6 +696,12 @@ function MainApp() {
   useEffect(() => {
     if (isRunning) {
       intervalIdRef.current = window.setInterval(captureAndSendFrame, 2000);
+      tier1IntervalIdRef.current = window.setInterval(() => {
+        if (videoRef.current && tier1DetectorRef.current) {
+          tier1DetectorRef.current.processFrame(videoRef.current, performance.now() / 1000);
+        }
+      }, 100);
+
       return () => {
         if (intervalIdRef.current) {
           clearInterval(intervalIdRef.current);
@@ -803,6 +954,32 @@ function MainApp() {
           </div>
         </div>
 
+        {/* Tier 1 On-Device Metrics */}
+        <div style={{ marginTop: "0.8rem", borderTop: "1px solid #27272a", paddingTop: "0.6rem" }}>
+          <div style={{ fontWeight: "bold", color: "#4ade80", marginBottom: "0.3rem" }}>
+            Tier 1 On-Device Detector:
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.25rem", fontSize: "0.8rem" }}>
+            <div>
+              Status:{" "}
+              <strong style={{ color: tier1Metrics.status === "ready" ? "#4ade80" : tier1Metrics.status === "error" ? "#ef4444" : "#facc15" }}>
+                {tier1Metrics.status}
+              </strong>
+            </div>
+            <div>
+              Backend: <strong style={{ color: "#38bdf8" }}>{tier1Metrics.backend}</strong>
+            </div>
+            <div>
+              FPS: <strong style={{ color: "#4ade80" }}>{tier1Metrics.fps}</strong>
+            </div>
+            <div>
+              Latency: <strong style={{ color: "#facc15" }}>{tier1Metrics.latencyMs} ms</strong>
+            </div>
+            <div style={{ gridColumn: "span 2" }}>
+              Model Load: <strong>{tier1Metrics.loadTimeMs} ms</strong>
+            </div>
+          </div>
+        </div>
         <div style={{ marginTop: "0.6rem", borderTop: "1px solid #27272a", paddingTop: "0.4rem" }}>
           Last Spoken (phrase table): <strong style={{ color: "#f43f5e" }}>"{lastSpoken}"</strong>
         </div>
@@ -1327,5 +1504,6 @@ export default function RootApp() {
   }, []);
 
   if (hash === "demo") return <DemoPage />;
+  if (hash === "tier1") return <Tier1ReviewPage onBack={() => { window.location.hash = ""; setHash("app"); }} />;
   return <MainApp />;
 }

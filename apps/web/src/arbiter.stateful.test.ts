@@ -75,7 +75,7 @@ function createSpeechEngine(arbiter: PriorityArbiter): SpeechEngine {
 // Message Generators
 // ============================================================================
 
-const priorityGen = fc.constantFrom(0, 1, 2, 3) as fc.Arbitrary<0 | 1 | 2 | 3>;
+// priorityGen
 const languageGen = fc.constantFrom("en", "hi") as fc.Arbitrary<"en" | "hi">;
 const hazardTypeGen = fc.constantFrom("pole", "vehicle", "person", "step_down");
 const directionGen = fc.constantFrom("left", "center", "right");
@@ -91,7 +91,7 @@ function genMessage(): fc.Arbitrary<ArbiterMessage> {
       priority: 0 as const, text, ttlMs: 0, key: "emergency", language, timestamp: Date.now(),
     })),
     fc.tuple(hazardTypeGen, directionGen, textGen, languageGen, fc.integer({ min: 0, max: 3 }), fc.float({ min: 0, max: 1 }), ttlGen, timestampGen)
-      .map(([hazardType, direction, text, language, urgency, confidence, ttlMs, timestamp]) => ({
+      .map(([hazardType, direction, text, language, _urgency, _confidence, ttlMs, timestamp]) => ({
         priority: 1 as const, text, ttlMs, key: `hazard:${hazardType}:${direction}`, language, timestamp, isStatus: false,
         clipKey: `hazard:${hazardType}:${direction}:none`, clipType: "hazards" as const,
       })),
@@ -130,7 +130,7 @@ interface TestResult {
 
 function runStream(stream: Array<{ msg: ArbiterMessage; delayMs: number }>, config?: Partial<Record<string, number>>): TestResult {
   const arbiter = new PriorityArbiter(
-    (t, l, k, r, ck, ct) => {}, () => {}, config
+    (_t, _l, _k, _r, _ck, _ct) => {}, () => {}, config
   );
   const engine = createSpeechEngine(arbiter);
 
@@ -194,7 +194,7 @@ describe("PriorityArbiter stateful property tests", () => {
         fc.tuple(fc.constantFrom(0, 1), hazardTypeGen, directionGen, textGen, languageGen, ttlGen, timestampGen),
         (lowerMsgs, [highPriority, hazardType, direction, hazardText, language, ttlMs, hazardTimestamp]) => {
           const arbiter = new PriorityArbiter(
-            (t, l, k, r, ck, ct) => {}, () => {}, {}
+            (_t, _l, _k, _r, _ck, _ct) => {}, () => {}, {}
           );
           const engine = createSpeechEngine(arbiter);
           (arbiter as any).speakFn = engine.speakFn;
@@ -219,7 +219,7 @@ describe("PriorityArbiter stateful property tests", () => {
 
           // Start speaking the lower priority if something was enqueued
           if (engine.isSpeaking) {
-            engine.onSpeechStart(lowerMsgs[0][0]);
+            engine.onSpeechStart(lowerMsgs[0]![0]);
           }
 
           // Now enqueue P1/P0
@@ -312,7 +312,7 @@ describe("PriorityArbiter stateful property tests", () => {
           const { events } = runStream(stream);
 
           const speaks = events.filter(c => c.type === "speak");
-          const byKey = new Map<string, Array<{ timestamp: number; isStatus: boolean; isEmergency: boolean }>>();
+          const byKey = new Map<string, Array<{ timestamp: number; isStatus: boolean; isEmergency: boolean; isNav: boolean; isAdv: boolean }>>();
 
           for (const call of speaks) {
             if (call.key) {
@@ -325,12 +325,12 @@ describe("PriorityArbiter stateful property tests", () => {
             }
           }
 
-          for (const [key, speaksList] of byKey) {
+          for (const [_key, speaksList] of byKey) {
             if (speaksList.length > 1) {
               for (let i = 1; i < speaksList.length; i++) {
-                const diff = speaksList[i].timestamp - speaksList[i - 1].timestamp;
+                const diff = (speaksList[i]?.timestamp ?? 0) - (speaksList[i - 1]?.timestamp ?? 0);
                 // Skip dedupe check for P0 (emergency), P2 (nav), P3 (advisory), and P1 status
-                if (speaksList[i].isEmergency || speaksList[i].isNav || speaksList[i].isAdv || speaksList[i].isStatus) continue;
+                if (speaksList[i]?.isEmergency || speaksList[i]?.isNav || speaksList[i]?.isAdv || speaksList[i]?.isStatus) continue;
                 // For hazards (P1 non-status): 4s dedupe window
                 expect(diff).toBeGreaterThanOrEqual(4000);
               }
@@ -350,7 +350,7 @@ describe("PriorityArbiter stateful property tests", () => {
         fc.integer({ min: 0, max: 3 }), fc.float({ min: 0, max: 1 }),
         (hazardType, direction, text, language, urgency, confidence) => {
           const arbiter = new PriorityArbiter(
-            (t, l, k, r, ck, ct) => {}, () => {}, {}
+            (_t, _l, _k, _r, _ck, _ct) => {}, () => {}, {}
           );
           const engine = createSpeechEngine(arbiter);
           (arbiter as any).speakFn = engine.speakFn;
@@ -396,7 +396,7 @@ describe("PriorityArbiter stateful property tests", () => {
         fc.constantFrom("paused", "back", "limited") as fc.Arbitrary<"paused" | "back" | "limited">,
         (hazardType, direction, hazardText, language, statusType) => {
           const arbiter = new PriorityArbiter(
-            (t, l, k, r, ck, ct) => {}, () => {}, {}
+            (_t, _l, _k, _r, _ck, _ct) => {}, () => {}, {}
           );
           const engine = createSpeechEngine(arbiter);
           (arbiter as any).speakFn = engine.speakFn;
@@ -429,7 +429,7 @@ describe("PriorityArbiter stateful property tests", () => {
           expect(statusSpeaks.length).toBeGreaterThanOrEqual(1);
 
           if (statusSpeaks.length > 0) {
-            const waitTime = statusSpeaks[0].timestamp - statusMsg.timestamp;
+            const waitTime = statusSpeaks[0]!.timestamp - statusMsg.timestamp;
             expect(waitTime).toBeLessThanOrEqual(3500);
           }
         }

@@ -27,6 +27,8 @@ export interface PhraseTables {
   directions: Record<string, PhraseDirection>;
   avoid_actions: Record<string, PhraseAvoidAction>;
   system_messages: Record<string, SystemMessage>;
+  moving_hazards?: string[];
+  caution_actions?: Record<string, { en: string; hi: string }>;
 }
 
 // Load from shared JSON
@@ -36,6 +38,9 @@ export const NOUNS = PHRASES.nouns;
 export const DIRECTIONS = PHRASES.directions;
 export const AVOID_ACTIONS = PHRASES.avoid_actions;
 export const SYSTEM_MESSAGES = PHRASES.system_messages;
+export const MOVING_HAZARDS = new Set(
+  PHRASES.moving_hazards ?? ["vehicle", "person", "bicycle", "animal", "rickshaw"]
+);
 
 export const buildPhrase = (
   hazard: {
@@ -65,10 +70,22 @@ export const buildPhrase = (
 
   // 2. Direction
   const dirCode = (hazard.direction || "center").toLowerCase().trim();
+
+  // 3. Hard Rule 8: Moving hazard gets caution + position; NO steering
+  if (MOVING_HAZARDS.has(hType)) {
+    if (dirCode === "center") {
+      return langCode === "hi" ? `${noun} आगे, रुकें` : `${noun} ahead, stop`;
+    } else if (dirCode === "left") {
+      return langCode === "hi" ? `${noun} बाएँ, सावधान` : `${noun} on left, careful`;
+    } else if (dirCode === "right") {
+      return langCode === "hi" ? `${noun} दाएँ, सावधान` : `${noun} on right, careful`;
+    }
+  }
+
   const dirInfo = DIRECTIONS[dirCode] ?? DIRECTIONS.center!;
   const dirWord = dirInfo[langCode];
 
-  // 3. Avoid action from clear_side
+  // 4. Avoid action from clear_side for static obstacles
   const clearCode = (hazard.clear_side || "none").toLowerCase().trim();
   const avoidInfo = AVOID_ACTIONS[clearCode];
 

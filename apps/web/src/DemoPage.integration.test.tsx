@@ -4,7 +4,6 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { act } from "react";
 import ReactDOM from "react-dom/client";
 import RootApp from "./App";
-import { buildPhrase } from "./phrases";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -198,7 +197,7 @@ describe("DemoPage integration", () => {
 
     // Verify speechSynthesis.speak was called for P3
     expect(mockSpeechSynthesis.speak).toHaveBeenCalled();
-    const p3Utterance = mockSpeechSynthesis.speak.mock.calls[mockSpeechSynthesis.speak.mock.calls.length - 1][0];
+    const p3Utterance = mockSpeechSynthesis.speak.mock.calls[mockSpeechSynthesis.speak.mock.calls.length - 1]?.[0]!;
     expect(p3Utterance.text).toContain("Demo message, priority three");
 
     // Manually trigger the onstart callback to simulate speech starting
@@ -240,7 +239,7 @@ describe("DemoPage integration", () => {
 
     // Verify the P1 message was spoken after cancel
     const lastSpeakCall = mockSpeechSynthesis.speak.mock.calls[mockSpeechSynthesis.speak.mock.calls.length - 1];
-    expect(lastSpeakCall[0].text).toContain("Vehicle") || lastSpeakCall[0].text.includes("गाड़ी");
+    expect(lastSpeakCall![0].text).toMatch(/Vehicle|गाड़ी/);
   });
 
   it("5 cycles of P3 then P1 all interrupt correctly, even with late onend from cancelled utterance", async () => {
@@ -285,7 +284,7 @@ describe("DemoPage integration", () => {
       });
 
       // Get the P3 utterance and trigger onstart
-      const p3Utterance = mockSpeechSynthesis.speak.mock.calls[mockSpeechSynthesis.speak.mock.calls.length - 1][0];
+      const p3Utterance = mockSpeechSynthesis.speak.mock.calls[mockSpeechSynthesis.speak.mock.calls.length - 1]?.[0]!;
       expect(p3Utterance.text).toContain("Demo message, priority three");
 
       if (p3Utterance.onstart) {
@@ -330,8 +329,8 @@ describe("DemoPage integration", () => {
       });
 
       // Verify arbiter is still in correct state by checking P1 utterance exists
-      const p1Utterance = mockSpeechSynthesis.speak.mock.calls[mockSpeechSynthesis.speak.mock.calls.length - 1][0];
-      expect(p1Utterance.text).toContain("Vehicle") || p1Utterance.text.includes("गाड़ी");
+      const p1Utterance = mockSpeechSynthesis.speak.mock.calls[mockSpeechSynthesis.speak.mock.calls.length - 1]?.[0]!;
+      expect(p1Utterance?.text).toMatch(/Vehicle|गाड़ी/);
 
       // Advance fake time by 5 seconds to bypass 4s hazard dedupe window for next cycle
       vi.setSystemTime(Date.now() + 5000);
@@ -372,8 +371,8 @@ describe("DemoPage integration", () => {
     await act(async () => {
       await vi.runAllTimersAsync();
     });
-    const firstP1Utterance = mockSpeechSynthesis.speak.mock.calls[mockSpeechSynthesis.speak.mock.calls.length - 1][0];
-    expect(firstP1Utterance.text).toContain("Vehicle") || firstP1Utterance.text.includes("गाड़ी");
+    const firstP1Utterance = mockSpeechSynthesis.speak.mock.calls[mockSpeechSynthesis.speak.mock.calls.length - 1]?.[0]!;
+    expect(firstP1Utterance?.text).toMatch(/Vehicle|गाड़ी/);
 
     // Trigger onstart for first P1
     if (firstP1Utterance.onstart) {
@@ -402,7 +401,7 @@ describe("DemoPage integration", () => {
     await act(async () => {
       await vi.runAllTimersAsync();
     });
-    const p3Utterance = mockSpeechSynthesis.speak.mock.calls[mockSpeechSynthesis.speak.mock.calls.length - 1][0];
+    const p3Utterance = mockSpeechSynthesis.speak.mock.calls[mockSpeechSynthesis.speak.mock.calls.length - 1]?.[0]!;
     expect(p3Utterance.text).toContain("Demo message, priority three");
 
     // Trigger onstart for P3 (P3 is now "speaking")
@@ -435,7 +434,7 @@ describe("DemoPage integration", () => {
 
     // Check what happened
     const cancelCalled = mockSpeechSynthesis.cancel.mock.calls.length > 0;
-    const speakCallsAfterP3 = mockSpeechSynthesis.speak.mock.calls.filter((call, idx) => {
+    const speakCallsAfterP3 = mockSpeechSynthesis.speak.mock.calls.filter((_call, idx) => {
       // Find calls after the P3 utterance
       return idx > mockSpeechSynthesis.speak.mock.calls.findIndex(c => c[0] === p3Utterance);
     });
@@ -467,7 +466,7 @@ describe("DemoPage integration", () => {
         await vi.runAllTimersAsync();
       });
       // P1 should NOT be spoken after P3's natural end
-      const speakCallsAfterP3End = mockSpeechSynthesis.speak.mock.calls.filter((call, idx) => {
+      const speakCallsAfterP3End = mockSpeechSynthesis.speak.mock.calls.filter((_call, idx) => {
         return idx > mockSpeechSynthesis.speak.mock.calls.findIndex(c => c[0] === p3Utterance);
       });
       const p1SpokenAfterP3End = speakCallsAfterP3End.some(call =>
@@ -526,12 +525,12 @@ describe("DemoPage integration", () => {
 
     // Verify Hindi phrase was spoken
     const lastSpeakCall = mockSpeechSynthesis.speak.mock.calls[mockSpeechSynthesis.speak.mock.calls.length - 1];
-    const spokenText = lastSpeakCall[0].text;
+    const spokenText = lastSpeakCall![0].text;
     // Should contain Hindi vehicle phrase
     expect(spokenText).toMatch(/गाड़ी|आगे|बाएँ|दाएँ/);
 
     // Verify voice was set to hi-IN
-    expect(lastSpeakCall[0].lang).toBe("hi-IN");
+    expect(lastSpeakCall![0].lang).toBe("hi-IN");
 
     // Switch back to English
     const enButton = Array.from(container.querySelectorAll("button")).find((btn) =>
@@ -561,8 +560,8 @@ describe("DemoPage integration", () => {
 
     // Verify English phrase was spoken
     const enSpeakCall = mockSpeechSynthesis.speak.mock.calls[mockSpeechSynthesis.speak.mock.calls.length - 1];
-    expect(enSpeakCall[0].text).toMatch(/Vehicle|ahead|step left|step right/);
-    expect(enSpeakCall[0].lang).toBe("en-IN");
+    expect(enSpeakCall![0].text).toMatch(/Vehicle|ahead|step left|step right/);
+    expect(enSpeakCall![0].lang).toBe("en-IN");
   });
 
   it("P3 demo message is neutral (not 'clear' or safety claim)", async () => {
@@ -600,7 +599,7 @@ describe("DemoPage integration", () => {
     );
     expect(p3SpeakCalls.length).toBeGreaterThan(0);
 
-    const p3Text = p3SpeakCalls[p3SpeakCalls.length - 1][0].text;
+    const p3Text = p3SpeakCalls[p3SpeakCalls.length - 1]![0].text;
     // Should not contain "clear" or safety claims
     expect(p3Text.toLowerCase()).not.toContain("clear");
     expect(p3Text.toLowerCase()).not.toContain("safe");
@@ -639,8 +638,8 @@ describe("DemoPage integration", () => {
       await vi.runAllTimersAsync();
     });
 
-    const firstP1Utterance = mockSpeechSynthesis.speak.mock.calls[mockSpeechSynthesis.speak.mock.calls.length - 1][0];
-    expect(firstP1Utterance.text).toContain("Vehicle") || firstP1Utterance.text.includes("गाड़ी");
+    const firstP1Utterance = mockSpeechSynthesis.speak.mock.calls[mockSpeechSynthesis.speak.mock.calls.length - 1]?.[0]!;
+    expect(firstP1Utterance?.text).toMatch(/Vehicle|गाड़ी/);
 
     // Trigger onstart for first P1
     if (firstP1Utterance.onstart) {

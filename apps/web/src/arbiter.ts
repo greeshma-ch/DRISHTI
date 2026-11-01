@@ -5,9 +5,9 @@ import { SYSTEM_MESSAGES } from "./phrases";
 export type Priority = 0 | 1 | 2 | 3; // P0=emergency, P1=hazard, P2=nav, P3=advisory
 
 export type ArbiterDecision =
-  | { type: "interrupt"; reason: "P0" | "P1_interrupts_P2" | "P1_interrupts_P3" | "status_interrupts_P1" }
-  | { type: "deferred"; reason: "rate_limit" | "P1_active" | "P0_active" }
-  | { type: "dropped"; reason: "ttl_expired" | "dedupe" | "rate_limit_enqueue" | "rate_limit_deferred_interrupt" }
+  | { type: "interrupt"; reason: "P0" | "P1_interrupts_P2" | "P1_interrupts_P3" | "status_interrupts_P1" | "P1_urgency3_interrupts_P1" }
+  | { type: "deferred"; reason: "rate_limit" | "P1_active" | "P0_active" | "P1_queued_as_next" }
+  | { type: "dropped"; reason: "ttl_expired" | "dedupe" | "rate_limit_enqueue" | "rate_limit_deferred_interrupt" | "queue_limit" }
   | { type: "spoken"; reason: "normal" | "interrupt" | "P0_immediate" };
 
 export interface ArbiterMessage {
@@ -88,10 +88,6 @@ export class PriorityArbiter {
   /** Enqueue a message. Returns true if accepted (not dropped by TTL). */
   enqueue(msg: ArbiterMessage): boolean {
     const now = Date.now();
-    if (now - msg.timestamp > msg.ttlMs) {
-      this.emitDecision({ type: "dropped", reason: "ttl_expired" }, msg);
-      return false; // expired before enqueue
-    }
 
     // P0: emergency — never queued, speak immediately
     if (msg.priority === 0) {
@@ -103,6 +99,11 @@ export class PriorityArbiter {
       this.currentUtterancePriority = 0;
       this.emitDecision({ type: "spoken", reason: "P0_immediate" }, msg);
       return true;
+    }
+
+    if (now - msg.timestamp > msg.ttlMs) {
+      this.emitDecision({ type: "dropped", reason: "ttl_expired" }, msg);
+      return false; // expired before enqueue
     }
 
     // Dedupe for P1 (hazards and status): same key within dedupe window (4s)
@@ -139,12 +140,21 @@ export class PriorityArbiter {
     if (this.currentUtterancePriority === 1 && !this.isCurrentStatusMessage()) {
       const statusMsg = this.queue.find((m) => m.priority === 1 && m.isStatus);
       if (statusMsg && Date.now() - statusMsg.timestamp > this.config.statusMaxWaitMs) {
-        this.cancelFn(this.currentUtterancePriority); // Interrupt the hazard for the status message
+        this.cancelFn(this.currentUtterancePriority as Priority); // Interrupt the hazard for the status message
         this.emitDecision({ type: "interrupt", reason: "status_interrupts_P1" }, statusMsg);
       }
     }
     this.isSpeaking = false;
     this.processQueue();
+  }
+
+
+  getLastSpokenAt(): number {
+    return this.lastSpokenAt;
+  }
+
+  getLastHazardSpokenAt(): number {
+    return this.lastHazardSpokenAt;
   }
 
   /** Called when TTS starts. */
@@ -156,7 +166,7 @@ export class PriorityArbiter {
   /** Clear queue (e.g., on stop vision). */
   clear(): void {
     this.queue = [];
-    this.cancelFn(this.currentUtterancePriority);
+    this.cancelFn(this.currentUtterancePriority as Priority);
     this.isSpeaking = false;
   }
 
@@ -421,3 +431,70 @@ export function makeVisionLimitedMessage(language: "en" | "hi"): ArbiterMessage 
     clipType: "system",
   };
 }
+
+/** Factory for Vision limited moving-only status (Req D9, P1 with status flag). */
+export function makeVisionLimitedMovingOnlyMessage(language: "en" | "hi"): ArbiterMessage {
+  const msg = SYSTEM_MESSAGES.vision_limited_moving_only;
+  return {
+    priority: 1,
+    text: language === "hi"
+      ? (msg?.hi ?? "दृष्टि सीमित, केवल गतिमान वस्तुएँ")
+      : (msg?.en ?? "Vision limited, moving-object alerts only"),
+    ttlMs: 20000,
+    key: "status:vision_limited_moving_only",
+    language,
+    timestamp: Date.now(),
+    isStatus: true,
+    clipKey: getSystemClipKey("vision_limited_moving_only"),
+    clipType: "system",
+  };
+}
+
+/** Factory for Detector unavailable status (P1 with status flag). */
+export function makeDetectorUnavailableMessage(language: "en" | "hi"): ArbiterMessage {
+  const msg = SYSTEM_MESSAGES.detector_unavailable;
+  return {
+    priority: 1,
+    text: language === "hi" ? (msg?.hi ?? "डिटेक्टर अनुपलब्ध") : (msg?.en ?? "Detector unavailable"),
+    ttlMs: 10000,
+    key: "status:detector_unavailable",
+    language,
+    timestamp: Date.now(),
+    isStatus: true,
+    clipKey: getSystemClipKey("detector_unavailable"),
+    clipType: "system",
+  };
+}
+
+/** Factory for Camera blocked status (P1 with status flag). */
+export function makeCameraBlockedMessage(language: "en" | "hi"): ArbiterMessage {
+  const msg = SYSTEM_MESSAGES.camera_blocked;
+  return {
+    priority: 1,
+    text: language === "hi" ? (msg?.hi ?? "कैमरा बंद या बहुत पास, रुकें") : (msg?.en ?? "Camera blocked or too close, stop"),
+    ttlMs: 5000,
+    key: "status:camera_blocked",
+    language,
+    timestamp: Date.now(),
+    isStatus: true,
+    clipKey: getSystemClipKey("camera_blocked"),
+    clipType: "system",
+  };
+}
+
+/** Factory for Camera clear status (P1 with status flag). */
+export function makeCameraClearMessage(language: "en" | "hi"): ArbiterMessage {
+  const msg = SYSTEM_MESSAGES.camera_clear;
+  return {
+    priority: 1,
+    text: language === "hi" ? (msg?.hi ?? "कैमरा साफ़") : (msg?.en ?? "Camera clear"),
+    ttlMs: 5000,
+    key: "status:camera_clear",
+    language,
+    timestamp: Date.now(),
+    isStatus: true,
+    clipKey: getSystemClipKey("camera_clear"),
+    clipType: "system",
+  };
+}
+

@@ -38,6 +38,8 @@ VALID_HAZARD_TYPES = {
     "pothole",
     "open_drain",
     "construction",
+    "plant",
+    "bag",
     "other",
 }
 VALID_DIRECTIONS = {"left", "center", "right"}
@@ -170,10 +172,11 @@ def reset_parse_failures() -> None:
 
 SYSTEM_PROMPT = (
     "You are Drishti, an AI walking companion. "
-    "Identify the single most urgent imminent hazard in the walking path. "
+    "Identify the single most urgent imminent hazard in the walking path, "
+    "especially stairs up or down, drop-offs, potholes, or obstacles. "
     "Return ONLY JSON: "
     '{"hazard":{"type":"chair|table|bench|door|wall|pole|tree_branch|vehicle|rickshaw|'
-    'bicycle|person|animal|stairs|step_down|pothole|open_drain|construction|other",'
+    'bicycle|person|animal|stairs|step_down|pothole|open_drain|construction|plant|bag|other",'
     '"direction":"left|center|right","distance":"near|mid|far",'
     '"clear_side":"left|right|none","label":"max 2 words if other","urgency":0-3}} '
     'or {"hazard":null} if no hazard.'
@@ -329,7 +332,7 @@ async def analyze_frame(
         )
 
     b64_image = base64.b64encode(image_bytes).decode("utf-8")
-    user_prompt = "Identify most urgent hazard."
+    user_prompt = "Identify most urgent hazard, including stairs up or down."
 
     def make_payload(max_tokens: int) -> dict[str, Any]:
         return {

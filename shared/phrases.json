@@ -17,12 +17,25 @@
     "pothole": { "en": "Pothole", "hi": "गड्ढा" },
     "open_drain": { "en": "Drain", "hi": "नाला" },
     "construction": { "en": "Construction", "hi": "निर्माण" },
+    "plant": { "en": "Plant", "hi": "पौधा" },
+    "bag": { "en": "Bag", "hi": "बैग" },
     "other": { "en": "Hazard", "hi": "खतरा" }
   },
   "directions": {
     "center": { "en": "ahead", "hi": "आगे" },
     "left": { "en": "left", "hi": "बाएँ" },
     "right": { "en": "right", "hi": "दाएँ" }
+  },
+  "moving_hazards": [
+    "vehicle",
+    "person",
+    "bicycle",
+    "animal",
+    "rickshaw"
+  ],
+  "caution_actions": {
+    "center": { "en": "stop", "hi": "रुकें" },
+    "side": { "en": "careful", "hi": "सावधान" }
   },
   "avoid_actions": {
     "right": { "en": "step right", "hi": "दाएँ हटें" },
@@ -32,6 +45,10 @@
     "vision_paused": { "en": "Vision paused", "hi": "दृष्टि रुकी" },
     "vision_back": { "en": "Vision back", "hi": "दृष्टि वापस" },
     "vision_limited": { "en": "Vision limited", "hi": "दृष्टि सीमित" },
+    "vision_limited_moving_only": { "en": "Vision limited, moving-object alerts only", "hi": "दृष्टि सीमित, केवल गतिमान वस्तुएँ" },
+    "camera_blocked": { "en": "Camera blocked or too close, stop", "hi": "कैमरा बंद या बहुत पास, रुकें" },
+    "camera_clear": { "en": "Camera clear", "hi": "कैमरा साफ़" },
+    "detector_unavailable": { "en": "Detector unavailable", "hi": "डिटेक्टर अनुपलब्ध" },
     "emergency_triggered": { "en": "Emergency triggered", "hi": "आपातकाल शुरू" },
     "emergency_cancelled": { "en": "Emergency cancelled", "hi": "आपातकाल रद्द" }
   }
