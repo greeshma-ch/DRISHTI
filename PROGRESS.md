@@ -75,33 +75,36 @@ Throttle levels are defined in AGENTS.md (warn $60, throttle $90, block dev call
 | Nov 01 | Tier 1 Slow-Phone Hardening & Verifiable Decisions | Time-based rules (0.8s tracked, 0.6s sustained closing; vehicle alerts in 0.8s <= 1.5s @ 2.5 FPS); decision logging (alerted vs suppressed) & CSV export; live clip pipeline; 192/256px resolution; skip Tier 2 when busy/blocked; stairs prompt & verification script |
 | Nov 01 | Tier 1 Deterministic Stepper & Evaluation (Task A) | Deterministic 0.25s video stepper via seeked events; stall detector (2s timeout); deduplicated decision logs (logged on state change); capped 200 row display; missed hazard logging; HEVC alert banner |
 | Nov 01 | Tier 2 Truncation Reduction & Monitoring (Task B) | First attempt max_tokens=800, retry=1200; shortened prompt with one-line JSON example; retries/total frames and median reasoning tokens in /status and Debug Overlay; >10% retry warning |
+| Nov 01 | Tier 1 Android Chrome Hardware Sampling & Telemetry | requestVideoFrameCallback (rVFC) sampling at playbackRate 1, muted, 0.4s default; seek fallback; loadeddata gate; video diagnostics HUD (readyState, networkState, errors, dimensions, 10 events); whole-clip evaluation with alert True/False/Missed marking & CSV export |
 
 ## Current session
 
-- Working on: Task A (Deterministic Stepper & Clip Eval) and Task B (Tier 2 Truncation Reduction & Monitoring) (COMPLETED)
+- Working on: Android Chrome Tier 1 Fix (requestVideoFrameCallback, Diagnostics, loadeddata gate, Whole Clip Eval) (COMPLETED)
 - Done this session:
-  - **Task A (Committed `2df3c2e`)**:
-    - Replaced free-play loop with deterministic stepper (0.25 s steps via `video.currentTime`, awaiting `seeked`, single detection per sample time, sample time as timestamp).
-    - Added stall detection on seek failure (2s timeout, reporting "video stalled at t=...") and Cancel button.
-    - Logged decisions once per tracked object per decision change; capped on-screen list to 200 rows with counter; exported all rows to CSV with unique ID.
-    - Added "Mark missed hazard" during playback recording `(clip, t, type, direction, label="missed")` with True/False buttons for alerts.
-    - Added HEVC format detection with ffmpeg conversion banner.
-    - Unit tests in `apps/web/src/tier1/eval_stepper.test.ts`.
-  - **Task B (Committed separately)**:
-    - Set first attempt `max_tokens = 800` (billed on tokens used), retry `max_tokens = 1200`.
-    - Shortened `SYSTEM_PROMPT` to ask for single most urgent hazard only with a one-line JSON example.
-    - Added `get_perception_stats()` and `@app.get("/status")` returning `retries`, `total_frames`, `retries_display`, `median_reasoning_tokens`, and spend.
-    - Added >10% retry warning logging (`High Tier 2 retry rate: ...`).
-    - Added Retries / Frames (`0 / 0`) and Median Reasoning Tokens display to Web App Debug Overlay and `/frame` response payload.
-    - Unit tests in `server/tests/test_frame.py` for 800/1200 token limits, `/status`, and high retry warning logging.
-  - **Verification**:
-    - `pytest server/tests`: 28 passed in 1.18s.
-    - `ruff check server`: 0 errors.
-    - `mypy server`: 0 errors.
-    - `vitest run`: 106 passed across 8 test suites.
+  - **Video Pipeline Diagnostics HUD (Item 1)**:
+    - Displayed live `video.readyState` (with mapped descriptions `0: HAVE_NOTHING` to `4: HAVE_ENOUGH_DATA`).
+    - Displayed `video.networkState`, `video.error` code/message, duration, and resolution (`videoWidth x videoHeight`).
+    - Displayed rolling telemetry buffer of the last 10 media events (`loadeddata`, `seeking`, `seeked`, `canplay`, `stalled`, `error`, etc.) with timestamps.
+  - **Clip Loading & loadeddata Gate (Item 2)**:
+    - Clips loaded via `URL.createObjectURL(file)`.
+    - Added required attributes: `muted`, `playsInline`, `preload="auto"`.
+    - Gated all control buttons (`Run Clip Evaluation`, `Play Sampling`, `Cancel`, `+ Mark Missed Hazard`) to remain disabled until `loadeddata` event fires.
+  - **requestVideoFrameCallback Sampling with Seek Fallback (Item 3)**:
+    - Implemented `VideoClipSampler`: plays video muted at `playbackRate = 1.0` and samples frames via `requestVideoFrameCallback` only when `mediaTime` advances by `sampleIntervalSec` (default 0.4s, adjustable) AND `detector.isBusy()` is false.
+    - Used `mediaTime` directly as the timestamp for tracking, closing speed calculations, and time-based rules.
+    - Automatic fallback to seek-based stepper when `requestVideoFrameCallback` is unsupported.
+    - 2.0 s stall watchdog reporting `"video stalled at t=..."`.
+  - **Whole Clip Automatic Evaluation & Alerts Marking (Item 4)**:
+    - "Run Clip Evaluation" executes entire clip automatically through detector, tracker, and live `PriorityArbiter`.
+    - Removed "Before vs After" comparison panel and `+/-0.25 s` buttons.
+    - Shows alert list with dedicated **True / False / Missed** annotation buttons and **Export Alerts CSV** button.
+  - **Testing & Verification (Item 5)**:
+    - 12 comprehensive unit tests in `apps/web/src/tier1/eval_stepper.test.ts` covering mocked video events for both paths, stall reporting, and decision change deduplication.
+    - `vitest run`: 112 passed across 8 test suites.
     - `tsc --noEmit`: 0 errors.
     - `npm run lint`: 0 errors.
-    - `npm run build`: built in 17.06s.
+    - `npm run build`: built in 14.20s.
+    - `pytest server/tests`: 28 passed.
 - Next: P4 Tier 2 hardening, rate limiter, spend guard.
 - Blockers: None
 

@@ -14,37 +14,34 @@ import { DEFAULT_TIER1_CONFIG } from "./config";
 import { buildPhrase } from "../phrases";
 import { PriorityArbiter, makeHazardMessage } from "../arbiter";
 import {
-  DEFAULT_STEP_SEC,
-  DeterministicVideoStepper,
+  DEFAULT_SAMPLE_INTERVAL_SEC,
+  VideoClipSampler,
+  VideoDiagnostics,
   createMissedHazardLog,
+  extractDiagnostics,
+  formatAlertsToCsv,
   formatDecisionsToCsv,
   getFfmpegConversionCommand,
   isHevcClip,
-  waitForSeek,
 } from "./eval_stepper";
 
 interface LoggedAlert {
+  id: string;
   timeSec: number;
   alert: Tier1Alert;
   phraseEn: string;
   phraseHi: string;
-}
-
-interface ClipEvalSummary {
-  clipDurationSec: number;
-  beforeAlertsCount: number;
-  beforeAlertsPerMin: number;
-  afterAlertsCount: number;
-  afterAlertsPerMin: number;
-  reductionPercent: number;
-  device: string;
-  runtime: string;
+  label?: "True" | "False" | "Missed" | "";
 }
 
 export function Tier1ReviewPage({ onBack }: { onBack: () => void }): React.ReactElement {
   const [videoSrc, setVideoSrc] = useState<string | null>(null);
   const [loadedFileName, setLoadedFileName] = useState<string>("clip");
   const [isPlaying, setIsPlaying] = useState(false);
+  const [isLoadedData, setIsLoadedData] = useState(false);
+  const [sampleIntervalSec, setSampleIntervalSec] = useState<number>(DEFAULT_SAMPLE_INTERVAL_SEC);
+  const [samplerMode, setSamplerMode] = useState<"rvfc" | "seek">("rvfc");
+
   const [metrics, setMetrics] = useState<Tier1Metrics>({
     fps: 0,
     latencyMs: 0,
@@ -59,11 +56,27 @@ export function Tier1ReviewPage({ onBack }: { onBack: () => void }): React.React
   const [clipDuration, setClipDuration] = useState<number>(0);
   const [currentVideoTime, setCurrentVideoTime] = useState<number>(0);
   const [stallMessage, setStallMessage] = useState<string | null>(null);
+  const [evalCompletedMessage, setEvalCompletedMessage] = useState<string | null>(null);
   const [hevcError, setHevcError] = useState<boolean>(false);
   const [showMissedModal, setShowMissedModal] = useState<boolean>(false);
   const [missedType, setMissedType] = useState<Tier1HazardType>("person");
   const [missedDirection, setMissedDirection] = useState<Direction>("center");
-  const stepperRef = useRef<DeterministicVideoStepper | null>(null);
+
+  // Video diagnostics (Req 1)
+  const [diagnostics, setDiagnostics] = useState<VideoDiagnostics>({
+    readyState: 0,
+    readyStateText: "0: HAVE_NOTHING",
+    networkState: 0,
+    networkStateText: "0: NETWORK_EMPTY",
+    errorCode: null,
+    errorMessage: null,
+    duration: 0,
+    videoWidth: 0,
+    videoHeight: 0,
+    lastEvents: [],
+  });
+
+  const samplerRef = useRef<VideoClipSampler | null>(null);
 
   // Live threshold tuning state
   const [config, setConfig] = useState<Tier1Config>({ ...DEFAULT_TIER1_CONFIG });
@@ -73,9 +86,8 @@ export function Tier1ReviewPage({ onBack }: { onBack: () => void }): React.React
   const [benchmarkResults, setBenchmarkResults] = useState<BenchmarkResult[]>([]);
   const [benchmarkStatus, setBenchmarkStatus] = useState<string>("");
 
-  // Clip Evaluation state (Before vs After)
+  // Clip Evaluation state
   const [isEvaluatingClip, setIsEvaluatingClip] = useState(false);
-  const [evalSummary, setEvalSummary] = useState<ClipEvalSummary | null>(null);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -111,14 +123,18 @@ export function Tier1ReviewPage({ onBack }: { onBack: () => void }): React.React
         "hi"
       );
 
+      const alertId = `alert_${currentTime.toFixed(2)}_${alert.type}_${alert.direction}_${Date.now()}`;
+
       setAlertLogs((prev) => [
         {
-          timeSec: Math.round(currentTime * 10) / 10,
+          id: alertId,
+          timeSec: Math.round(currentTime * 100) / 100,
           alert,
           phraseEn,
           phraseHi,
+          label: "",
         },
-        ...prev.slice(0, 49),
+        ...prev.slice(0, 99),
       ]);
     });
 
@@ -133,10 +149,59 @@ export function Tier1ReviewPage({ onBack }: { onBack: () => void }): React.React
 
     return () => {
       detector.stop();
-      stepperRef.current?.cancel();
+      samplerRef.current?.cancel();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loadedFileName]);
+
+  // Attach media event listeners to video element (Req 1 & 2)
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    video.muted = true;
+    video.playsInline = true;
+
+    const events = [
+      "loadedmetadata",
+      "loadeddata",
+      "canplay",
+      "canplaythrough",
+      "seeking",
+      "seeked",
+      "play",
+      "playing",
+      "pause",
+      "waiting",
+      "stalled",
+      "error",
+      "ended",
+    ];
+
+    const listener = (e: Event) => {
+      const eventName = e.type;
+      if (eventName === "loadeddata" || eventName === "canplay") {
+        setIsLoadedData(true);
+        if (video.duration) setClipDuration(video.duration);
+      }
+      if (eventName === "error") {
+        setIsLoadedData(false);
+      }
+      setDiagnostics((prev) => extractDiagnostics(video, prev.lastEvents, eventName));
+    };
+
+    events.forEach((ev) => video.addEventListener(ev, listener));
+
+    // Initial check
+    if (video.readyState >= 2) {
+      setIsLoadedData(true);
+    }
+    setDiagnostics((prev) => extractDiagnostics(video, prev.lastEvents));
+
+    return () => {
+      events.forEach((ev) => video.removeEventListener(ev, listener));
+    };
+  }, [videoSrc]);
 
   const handleConfigChange = (key: keyof Tier1Config, val: number) => {
     const nextConfig = { ...config, [key]: val };
@@ -175,17 +240,24 @@ export function Tier1ReviewPage({ onBack }: { onBack: () => void }): React.React
       const url = URL.createObjectURL(file);
       setVideoSrc(url);
       setLoadedFileName(file.name);
+      setIsLoadedData(false); // Enable buttons only after loadeddata (Req 2)
       setAlertLogs([]);
       setDecisionLogs([]);
       setActiveAlert(null);
-      setEvalSummary(null);
       setStallMessage(null);
+      setEvalCompletedMessage(null);
       setCurrentVideoTime(0);
 
-      // Requirement 5: Check if HEVC
+      // Check if HEVC
       const isHevc = isHevcClip({ name: file.name, type: file.type });
       setHevcError(isHevc);
     }
+  };
+
+  const handleLabelAlert = (id: string, label: "True" | "False" | "Missed") => {
+    setAlertLogs((prev) =>
+      prev.map((a) => (a.id === id ? { ...a, label: a.label === label ? "" : label } : a))
+    );
   };
 
   const handleLabelDecision = (id: string, label: "True" | "False") => {
@@ -195,8 +267,7 @@ export function Tier1ReviewPage({ onBack }: { onBack: () => void }): React.React
   };
 
   const handleOpenMissedModal = () => {
-    // Pause stepper during manual annotation (Req 4)
-    stepperRef.current?.pause();
+    samplerRef.current?.pause();
     setIsPlaying(false);
     setShowMissedModal(true);
   };
@@ -221,7 +292,20 @@ export function Tier1ReviewPage({ onBack }: { onBack: () => void }): React.React
     URL.revokeObjectURL(url);
   };
 
-  // Run live 100-frame benchmark on whatever runtime is actually installed (Req 4)
+  const exportAlertsCsv = () => {
+    const csvContent = formatAlertsToCsv(alertLogs, loadedFileName);
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    link.setAttribute("download", `${loadedFileName || "clip"}_tier1_alerts_${Date.now()}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  // Run live 100-frame benchmark on installed runtimes
   const runLiveBenchmark = async () => {
     if (!detectorRef.current || isBenchmarking) return;
     setIsBenchmarking(true);
@@ -317,21 +401,22 @@ export function Tier1ReviewPage({ onBack }: { onBack: () => void }): React.React
     }
   };
 
-  // Deterministic Stepping Loop (Req 1 & 2): 0.25s steps, no free-play
-  const handleStartStepper = async () => {
+  // requestVideoFrameCallback sampling with seek fallback (Req 3)
+  const handleStartSampler = async () => {
     const video = videoRef.current;
     const detector = detectorRef.current;
-    if (!video || !detector || !videoSrc || isPlaying) return;
+    if (!video || !detector || !videoSrc || !isLoadedData || isPlaying) return;
 
     setStallMessage(null);
+    setEvalCompletedMessage(null);
     setIsPlaying(true);
 
-    const stepper = new DeterministicVideoStepper(
+    const sampler = new VideoClipSampler(
       video,
       {
-        onStep: async (sampleTime) => {
-          setCurrentVideoTime(sampleTime);
-          const res = await detector.detectFrame(video, sampleTime);
+        onStep: async (mediaTime) => {
+          setCurrentVideoTime(mediaTime);
+          const res = await detector.detectFrame(video, mediaTime);
           drawOverlay(res.updatedTracks, video.videoWidth, video.videoHeight);
         },
         onProgress: (cur, dur) => {
@@ -352,21 +437,23 @@ export function Tier1ReviewPage({ onBack }: { onBack: () => void }): React.React
         onPause: () => {
           setIsPlaying(false);
         },
+        isDetectorIdle: () => !detector.isBusy(),
       },
-      DEFAULT_STEP_SEC
+      sampleIntervalSec
     );
 
-    stepperRef.current = stepper;
-    await stepper.start(video.currentTime > 0 && video.currentTime < (video.duration || 0));
+    samplerRef.current = sampler;
+    setSamplerMode(sampler.getMode());
+    await sampler.start(video.currentTime > 0 && video.currentTime < (video.duration || 0));
   };
 
-  const handlePauseStepper = () => {
-    stepperRef.current?.pause();
+  const handlePauseSampler = () => {
+    samplerRef.current?.pause();
     setIsPlaying(false);
   };
 
-  const handleCancelStepper = () => {
-    stepperRef.current?.cancel();
+  const handleCancelSampler = () => {
+    samplerRef.current?.cancel();
     setIsPlaying(false);
     if (videoRef.current) {
       videoRef.current.currentTime = 0;
@@ -374,40 +461,14 @@ export function Tier1ReviewPage({ onBack }: { onBack: () => void }): React.React
     }
   };
 
-  const handleStepOnce = async (forward = true) => {
-    const video = videoRef.current;
-    const detector = detectorRef.current;
-    if (!video || !detector || !videoSrc) return;
-
-    setStallMessage(null);
-    const step = forward ? DEFAULT_STEP_SEC : -DEFAULT_STEP_SEC;
-    const target = Math.max(
-      0,
-      Math.min(
-        video.duration || 1000,
-        Math.round((video.currentTime + step) / DEFAULT_STEP_SEC) * DEFAULT_STEP_SEC
-      )
-    );
-
-    video.currentTime = target;
-    const res = await waitForSeek(video, target, 2000);
-    if (res.ok) {
-      setCurrentVideoTime(target);
-      const detRes = await detector.detectFrame(video, target);
-      drawOverlay(detRes.updatedTracks, video.videoWidth, video.videoHeight);
-    } else if (res.stalled) {
-      setStallMessage(`video stalled at t=${video.currentTime.toFixed(2)}s`);
-    }
-  };
-
-  // Run live clip evaluation using the exact same detector, tracker and arbiter as live (Req 3)
+  // Run Clip Evaluation automatically across whole clip (Req 4)
   const runClipEvaluation = async () => {
     const video = videoRef.current;
-    if (!video || !videoSrc || isEvaluatingClip) return;
+    if (!video || !videoSrc || !isLoadedData || isEvaluatingClip) return;
 
     setIsEvaluatingClip(true);
-    setEvalSummary(null);
     setStallMessage(null);
+    setEvalCompletedMessage(null);
 
     const detector = detectorRef.current;
     if (!detector) {
@@ -420,21 +481,14 @@ export function Tier1ReviewPage({ onBack }: { onBack: () => void }): React.React
     setAlertLogs([]);
     setDecisionLogs([]);
 
-    const duration = video.duration || 21.0;
-
-    // Live arbiter to evaluate exact speech outputs as in live mode
-    const arbiterSpoken: string[] = [];
+    // Live priority arbiter
     const clipArbiter = new PriorityArbiter(
-      (text) => {
-        arbiterSpoken.push(text);
-      },
+      () => {},
       () => {},
       { hazardMinIntervalMs: 1500, hazardDedupeMs: 4000 }
     );
 
-    let rawDetectionsCount = 0;
     const unsubAlert = detector.onAlert((alert) => {
-      rawDetectionsCount += 1;
       const phrase = buildPhrase(
         {
           type: alert.type,
@@ -461,12 +515,15 @@ export function Tier1ReviewPage({ onBack }: { onBack: () => void }): React.React
     });
 
     try {
-      const stepper = new DeterministicVideoStepper(
+      video.currentTime = 0;
+      setCurrentVideoTime(0);
+
+      const sampler = new VideoClipSampler(
         video,
         {
-          onStep: async (sampleTime) => {
-            setCurrentVideoTime(sampleTime);
-            const res = await detector.detectFrame(video, sampleTime);
+          onStep: async (mediaTime) => {
+            setCurrentVideoTime(mediaTime);
+            const res = await detector.detectFrame(video, mediaTime);
             drawOverlay(res.updatedTracks, video.videoWidth, video.videoHeight);
           },
           onStall: (msg) => {
@@ -475,28 +532,18 @@ export function Tier1ReviewPage({ onBack }: { onBack: () => void }): React.React
           onError: (msg) => {
             setStallMessage(msg);
           },
+          isDetectorIdle: () => !detector.isBusy(),
         },
-        DEFAULT_STEP_SEC
+        sampleIntervalSec
       );
-      stepperRef.current = stepper;
-      await stepper.start(false);
 
-      const beforeCount = rawDetectionsCount;
-      const afterCount = arbiterSpoken.length;
-      const beforePerMin = Math.round((beforeCount / (duration / 60)) * 10) / 10;
-      const afterPerMin = Math.round((afterCount / (duration / 60)) * 10) / 10;
-      const reduction = Math.round(((beforePerMin - afterPerMin) / Math.max(0.1, beforePerMin)) * 1000) / 10;
+      samplerRef.current = sampler;
+      setSamplerMode(sampler.getMode());
+      await sampler.start(false);
 
-      setEvalSummary({
-        clipDurationSec: Math.round(duration * 10) / 10,
-        beforeAlertsCount: beforeCount,
-        beforeAlertsPerMin: beforePerMin,
-        afterAlertsCount: afterCount,
-        afterAlertsPerMin: afterPerMin,
-        reductionPercent: reduction,
-        device: typeof navigator !== "undefined" ? navigator.userAgent.slice(0, 60) : "Browser",
-        runtime: metrics.backend,
-      });
+      setEvalCompletedMessage(
+        `Evaluation finished (${video.duration.toFixed(1)}s). Review alert list below for True/False/Missed marking and CSV export.`
+      );
     } finally {
       unsubAlert();
       setIsEvaluatingClip(false);
@@ -531,9 +578,9 @@ export function Tier1ReviewPage({ onBack }: { onBack: () => void }): React.React
         }}
       >
         <div>
-          <h1 style={{ margin: 0, fontSize: "1.4rem" }}>Tier 1 On-Device Review & Live Benchmark</h1>
-          <p style={{ margin: "0.2rem 0 0", color: "#a1a1aa", fontSize: "0.85rem" }}>
-            Real-phone steering safety, false alarm reduction, and live performance benchmark
+          <h1 style={{ margin: 0, fontSize: "1.35rem" }}>Tier 1 On-Device Review & Benchmark</h1>
+          <p style={{ margin: "0.2rem 0 0", color: "#a1a1aa", fontSize: "0.82rem" }}>
+            Android Chrome hardware sampling (rVFC), diagnostic telemetry, and verifiable decisions
           </p>
         </div>
         <button
@@ -575,52 +622,164 @@ export function Tier1ReviewPage({ onBack }: { onBack: () => void }): React.React
           />
         </label>
         <span style={{ fontSize: "0.85rem", color: "#a1a1aa" }}>
-          {videoSrc ? `Clip loaded (${clipDuration.toFixed(1)}s) \u2014 ${isPlaying ? "Playing & Analyzing" : "Paused / Ready"}` : "Load an eval clip (.mp4, .webm)"}
+          {videoSrc
+            ? `${loadedFileName} (${clipDuration.toFixed(1)}s) \u2014 ${
+                !isLoadedData
+                  ? "Loading media (awaiting loadeddata)..."
+                  : isPlaying
+                  ? "Playing & Analyzing"
+                  : "Loaded & Ready"
+              }`
+            : "Load an eval clip (.mp4, .webm)"}
         </span>
         {videoSrc && (
           <button
             onClick={runClipEvaluation}
-            disabled={isEvaluatingClip}
+            disabled={!isLoadedData || isEvaluatingClip || isPlaying}
             style={{
-              padding: "8px 14px",
-              background: "#16a34a",
+              padding: "8px 16px",
+              background: !isLoadedData || isEvaluatingClip || isPlaying ? "#3f3f46" : "#16a34a",
               color: "#ffffff",
               border: "none",
               borderRadius: "6px",
-              cursor: "pointer",
+              cursor: !isLoadedData || isEvaluatingClip || isPlaying ? "not-allowed" : "pointer",
               fontWeight: "bold",
               fontSize: "0.85rem",
             }}
           >
-            {isEvaluatingClip ? "Evaluating..." : "Run Clip Evaluation (Before vs After)"}
+            {isEvaluatingClip ? "Running Whole Clip..." : "Run Clip Evaluation"}
           </button>
         )}
       </div>
 
-      {/* Clip Evaluation Results (Before vs After) */}
-      {evalSummary && (
-        <section
+      {/* Evaluation completion banner (Req 4) */}
+      {evalCompletedMessage && (
+        <div
           style={{
-            background: "rgba(22, 163, 74, 0.12)",
+            background: "rgba(22, 163, 74, 0.15)",
             border: "1px solid #16a34a",
+            color: "#86efac",
+            padding: "0.75rem 1rem",
             borderRadius: "6px",
-            padding: "0.8rem 1rem",
             marginBottom: "1rem",
             fontSize: "0.85rem",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
           }}
         >
-          <h3 style={{ margin: "0 0 0.4rem 0", color: "#4ade80", fontSize: "1rem" }}>
-            Live Clip Evaluation: Before vs. After
-          </h3>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "0.6rem" }}>
-            <div>Clip Duration: <strong>{evalSummary.clipDurationSec}s</strong></div>
-            <div>Before (Initial P3): <strong style={{ color: "#f87171" }}>{evalSummary.beforeAlertsPerMin} alerts/min</strong> ({evalSummary.beforeAlertsCount} alerts)</div>
-            <div>After (Hardened): <strong style={{ color: "#4ade80" }}>{evalSummary.afterAlertsPerMin} alerts/min</strong> ({evalSummary.afterAlertsCount} alerts)</div>
-            <div>Chatter Reduction: <strong style={{ color: "#38bdf8" }}>-{evalSummary.reductionPercent}%</strong></div>
-            <div>Device: <span style={{ color: "#a1a1aa", fontSize: "0.75rem" }}>{evalSummary.device}</span></div>
-          </div>
-        </section>
+          <span>✅ {evalCompletedMessage}</span>
+          <button
+            onClick={() => setEvalCompletedMessage(null)}
+            style={{ background: "transparent", border: "none", color: "#86efac", cursor: "pointer", fontSize: "0.9rem" }}
+          >
+            ✕
+          </button>
+        </div>
       )}
+
+      {/* Video Diagnostics HUD (Requirement 1) */}
+      <section
+        style={{
+          background: "#18181b",
+          border: "1px solid #27272a",
+          borderRadius: "6px",
+          padding: "0.8rem",
+          marginBottom: "1rem",
+          fontSize: "0.8rem",
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.6rem" }}>
+          <h2 style={{ margin: 0, fontSize: "0.92rem", color: "#38bdf8" }}>
+            Video Diagnostics & Media Telemetry
+          </h2>
+          <span
+            style={{
+              padding: "2px 8px",
+              borderRadius: "4px",
+              fontSize: "0.72rem",
+              fontWeight: "bold",
+              background: isLoadedData ? "#15803d" : "#71717a",
+              color: "#fff",
+            }}
+          >
+            {isLoadedData ? "✓ loadeddata Ready (Buttons Enabled)" : "Waiting for loadeddata (Buttons Disabled)"}
+          </span>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "0.5rem" }}>
+          <div>
+            readyState:{" "}
+            <strong style={{ color: diagnostics.readyState >= 2 ? "#4ade80" : "#facc15" }}>
+              {diagnostics.readyStateText}
+            </strong>
+          </div>
+          <div>
+            networkState:{" "}
+            <strong style={{ color: "#38bdf8" }}>{diagnostics.networkStateText}</strong>
+          </div>
+          <div>
+            Error Code:{" "}
+            <strong style={{ color: diagnostics.errorCode ? "#ef4444" : "#a1a1aa" }}>
+              {diagnostics.errorCode ?? "None"}
+            </strong>{" "}
+            {diagnostics.errorMessage ? `(${diagnostics.errorMessage})` : ""}
+          </div>
+          <div>
+            Duration: <strong>{diagnostics.duration ? `${diagnostics.duration.toFixed(2)}s` : "0.00s"}</strong>
+          </div>
+          <div>
+            Resolution:{" "}
+            <strong>
+              {diagnostics.videoWidth > 0 ? `${diagnostics.videoWidth} x ${diagnostics.videoHeight}` : "--"}
+            </strong>
+          </div>
+          <div>
+            Sampler Engine:{" "}
+            <strong style={{ color: samplerMode === "rvfc" ? "#4ade80" : "#facc15" }}>
+              {samplerMode === "rvfc" ? "requestVideoFrameCallback" : "Seek Stepper Fallback"}
+            </strong>
+          </div>
+        </div>
+
+        {/* Last 10 Media Events */}
+        <div style={{ marginTop: "0.6rem", borderTop: "1px solid #27272a", paddingTop: "0.5rem" }}>
+          <div style={{ fontSize: "0.75rem", color: "#a1a1aa", marginBottom: "4px" }}>
+            Last 10 Media Events:
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "4px" }}>
+            {diagnostics.lastEvents.length === 0 ? (
+              <span style={{ color: "#71717a", fontSize: "0.75rem" }}>No media events recorded yet.</span>
+            ) : (
+              diagnostics.lastEvents.map((ev, i) => (
+                <span
+                  key={i}
+                  style={{
+                    padding: "2px 6px",
+                    background:
+                      ev.event === "error" || ev.event === "stalled"
+                        ? "#7f1d1d"
+                        : ev.event === "loadeddata" || ev.event === "canplay"
+                        ? "#14532d"
+                        : "#27272a",
+                    color:
+                      ev.event === "error" || ev.event === "stalled"
+                        ? "#fecaca"
+                        : ev.event === "loadeddata" || ev.event === "canplay"
+                        ? "#86efac"
+                        : "#d4d4d8",
+                    borderRadius: "3px",
+                    fontSize: "0.72rem",
+                    fontFamily: "monospace",
+                  }}
+                >
+                  {ev.time}: {ev.event}
+                </span>
+              ))
+            )}
+          </div>
+        </div>
+      </section>
 
       {/* HUD Metrics & Alerts per Min */}
       <section
@@ -756,11 +915,10 @@ export function Tier1ReviewPage({ onBack }: { onBack: () => void }): React.React
             <video
               ref={videoRef}
               src={videoSrc}
+              muted
               playsInline
+              preload="auto"
               onError={() => setHevcError(true)}
-              onLoadedMetadata={() => {
-                if (videoRef.current) setClipDuration(videoRef.current.duration || 0);
-              }}
               style={{ width: "100%", display: "block", maxHeight: "420px" }}
             />
             <canvas
@@ -776,7 +934,7 @@ export function Tier1ReviewPage({ onBack }: { onBack: () => void }): React.React
             />
           </div>
 
-          {/* Deterministic Stepper Control Bar (Req 1 & 2) */}
+          {/* Sampler Control Bar (Req 2, 3, 4) */}
           <div
             style={{
               display: "flex",
@@ -791,30 +949,31 @@ export function Tier1ReviewPage({ onBack }: { onBack: () => void }): React.React
             }}
           >
             <button
-              onClick={isPlaying ? handlePauseStepper : handleStartStepper}
+              onClick={isPlaying ? handlePauseSampler : handleStartSampler}
+              disabled={!isLoadedData || isEvaluatingClip}
               style={{
                 padding: "6px 14px",
-                background: isPlaying ? "#f59e0b" : "#16a34a",
+                background: !isLoadedData || isEvaluatingClip ? "#3f3f46" : isPlaying ? "#f59e0b" : "#16a34a",
                 color: "#fff",
                 border: "none",
                 borderRadius: "4px",
-                cursor: "pointer",
+                cursor: !isLoadedData || isEvaluatingClip ? "not-allowed" : "pointer",
                 fontWeight: "bold",
                 fontSize: "0.8rem",
               }}
             >
-              {isPlaying ? "⏸ Pause" : "▶ Play Stepper (0.25s)"}
+              {isPlaying ? "⏸ Pause" : `▶ Play Sampling (${sampleIntervalSec.toFixed(2)}s)`}
             </button>
             <button
-              onClick={handleCancelStepper}
-              disabled={!isPlaying && currentVideoTime === 0}
+              onClick={handleCancelSampler}
+              disabled={!isLoadedData || (!isPlaying && currentVideoTime === 0)}
               style={{
                 padding: "6px 12px",
-                background: !isPlaying && currentVideoTime === 0 ? "#3f3f46" : "#dc2626",
+                background: !isLoadedData || (!isPlaying && currentVideoTime === 0) ? "#3f3f46" : "#dc2626",
                 color: "#fff",
                 border: "none",
                 borderRadius: "4px",
-                cursor: !isPlaying && currentVideoTime === 0 ? "not-allowed" : "pointer",
+                cursor: !isLoadedData || (!isPlaying && currentVideoTime === 0) ? "not-allowed" : "pointer",
                 fontSize: "0.8rem",
                 fontWeight: "bold",
               }}
@@ -822,44 +981,15 @@ export function Tier1ReviewPage({ onBack }: { onBack: () => void }): React.React
               ⏹ Cancel
             </button>
             <button
-              onClick={() => handleStepOnce(false)}
-              disabled={isPlaying}
-              style={{
-                padding: "6px 10px",
-                background: "#27272a",
-                border: "1px solid #3f3f46",
-                color: "#f4f4f5",
-                borderRadius: "4px",
-                cursor: isPlaying ? "not-allowed" : "pointer",
-                fontSize: "0.8rem",
-              }}
-            >
-              &larr; -0.25s
-            </button>
-            <button
-              onClick={() => handleStepOnce(true)}
-              disabled={isPlaying}
-              style={{
-                padding: "6px 10px",
-                background: "#27272a",
-                border: "1px solid #3f3f46",
-                color: "#f4f4f5",
-                borderRadius: "4px",
-                cursor: isPlaying ? "not-allowed" : "pointer",
-                fontSize: "0.8rem",
-              }}
-            >
-              +0.25s &rarr;
-            </button>
-            <button
               onClick={handleOpenMissedModal}
+              disabled={!isLoadedData || isEvaluatingClip}
               style={{
                 padding: "6px 12px",
-                background: "#eab308",
-                color: "#000",
+                background: !isLoadedData || isEvaluatingClip ? "#3f3f46" : "#eab308",
+                color: !isLoadedData || isEvaluatingClip ? "#a1a1aa" : "#000",
                 border: "none",
                 borderRadius: "4px",
-                cursor: "pointer",
+                cursor: !isLoadedData || isEvaluatingClip ? "not-allowed" : "pointer",
                 fontWeight: "bold",
                 fontSize: "0.8rem",
                 marginLeft: "auto",
@@ -888,7 +1018,7 @@ export function Tier1ReviewPage({ onBack }: { onBack: () => void }): React.React
         </div>
       )}
 
-      {/* Missed Hazard Annotation Modal (Req 4) */}
+      {/* Missed Hazard Annotation Modal */}
       {showMissedModal && (
         <div
           style={{
@@ -1007,7 +1137,7 @@ export function Tier1ReviewPage({ onBack }: { onBack: () => void }): React.React
         </div>
       )}
 
-      {/* Live Benchmark Panel (Req 2 & 3) */}
+      {/* Live Benchmark Panel */}
       <section
         style={{
           background: "#18181b",
@@ -1124,6 +1254,24 @@ export function Tier1ReviewPage({ onBack }: { onBack: () => void }): React.React
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "0.8rem", fontSize: "0.8rem" }}>
           <div>
             <label style={{ display: "block", marginBottom: "4px" }}>
+              Sample Interval: <strong>{sampleIntervalSec.toFixed(2)} s</strong>
+            </label>
+            <input
+              type="range"
+              min="0.1"
+              max="1.0"
+              step="0.05"
+              value={sampleIntervalSec}
+              onChange={(e) => {
+                const val = parseFloat(e.target.value);
+                setSampleIntervalSec(val);
+                samplerRef.current?.setSampleInterval(val);
+              }}
+              style={{ width: "100%" }}
+            />
+          </div>
+          <div>
+            <label style={{ display: "block", marginBottom: "4px" }}>
               Input Resolution: <strong>{config.inputSize ?? 320} px</strong>
             </label>
             <select
@@ -1209,7 +1357,144 @@ export function Tier1ReviewPage({ onBack }: { onBack: () => void }): React.React
         </div>
       </section>
 
-      {/* Tracked Object Decisions Log (Requirement 2) */}
+      {/* Triggered Alerts Log with True / False / Missed Marking & CSV Export (Req 4) */}
+      <section style={{ background: "#18181b", borderRadius: "6px", padding: "0.8rem", border: "1px solid #27272a", marginBottom: "1rem" }}>
+        <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "center", gap: "0.5rem", marginBottom: "0.5rem" }}>
+          <div>
+            <h2 style={{ fontSize: "0.95rem", margin: "0 0 0.2rem 0", color: "#a1a1aa" }}>
+              Triggered Alerts Log ({alertLogs.length}) &mdash; {alertsPerMin} alerts/min
+            </h2>
+            <div style={{ fontSize: "0.75rem", color: "#71717a" }}>
+              True: <strong style={{ color: "#22c55e" }}>{alertLogs.filter((a) => a.label === "True").length}</strong> | False: <strong style={{ color: "#ef4444" }}>{alertLogs.filter((a) => a.label === "False").length}</strong> | Missed: <strong style={{ color: "#eab308" }}>{alertLogs.filter((a) => a.label === "Missed").length}</strong>
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: "0.4rem" }}>
+            <button
+              onClick={exportAlertsCsv}
+              disabled={alertLogs.length === 0}
+              style={{
+                padding: "4px 10px",
+                background: alertLogs.length === 0 ? "#3f3f46" : "#2563eb",
+                border: "none",
+                color: "#ffffff",
+                borderRadius: "4px",
+                fontSize: "0.75rem",
+                fontWeight: "bold",
+                cursor: alertLogs.length === 0 ? "not-allowed" : "pointer",
+              }}
+            >
+              Export Alerts CSV
+            </button>
+            <button
+              onClick={() => setAlertLogs([])}
+              style={{
+                padding: "4px 8px",
+                background: "#27272a",
+                border: "1px solid #3f3f46",
+                color: "#a1a1aa",
+                borderRadius: "4px",
+                fontSize: "0.75rem",
+                cursor: "pointer",
+              }}
+            >
+              Clear
+            </button>
+          </div>
+        </div>
+
+        {alertLogs.length === 0 ? (
+          <p style={{ color: "#71717a", fontSize: "0.85rem", margin: 0 }}>
+            No alerts triggered. Run clip evaluation or play sampler to stream alerts.
+          </p>
+        ) : (
+          <div style={{ maxHeight: "280px", overflowY: "auto", fontSize: "0.78rem" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", textAlign: "left" }}>
+              <thead>
+                <tr style={{ color: "#a1a1aa", borderBottom: "1px solid #27272a" }}>
+                  <th style={{ padding: "4px 6px" }}>Time</th>
+                  <th style={{ padding: "4px 6px" }}>Hazard</th>
+                  <th style={{ padding: "4px 6px" }}>Urg</th>
+                  <th style={{ padding: "4px 6px" }}>Dir</th>
+                  <th style={{ padding: "4px 6px" }}>Dist</th>
+                  <th style={{ padding: "4px 6px" }}>Spoken</th>
+                  <th style={{ padding: "4px 6px" }}>Reason</th>
+                  <th style={{ padding: "4px 6px", textAlign: "center" }}>Mark Ground Truth</th>
+                </tr>
+              </thead>
+              <tbody>
+                {alertLogs.map((log) => (
+                  <tr key={log.id} style={{ borderBottom: "1px solid #27272a" }}>
+                    <td style={{ padding: "4px 6px", color: "#38bdf8" }}>{log.timeSec.toFixed(2)}s</td>
+                    <td style={{ padding: "4px 6px", fontWeight: "bold" }}>{log.alert.type}</td>
+                    <td style={{ padding: "4px 6px", color: log.alert.urgency === 3 ? "#ef4444" : "#f97316" }}>
+                      {log.alert.urgency}
+                    </td>
+                    <td style={{ padding: "4px 6px" }}>{log.alert.direction}</td>
+                    <td style={{ padding: "4px 6px" }}>{log.alert.distance}</td>
+                    <td style={{ padding: "4px 6px" }}>
+                      "{log.phraseEn}" / <span style={{ color: "#facc15" }}>"{log.phraseHi}"</span>
+                    </td>
+                    <td style={{ padding: "4px 6px", fontFamily: "monospace", color: "#a1a1aa", fontSize: "0.72rem" }}>
+                      {log.alert.reason}
+                    </td>
+                    <td style={{ padding: "4px 6px", textAlign: "center" }}>
+                      <div style={{ display: "inline-flex", gap: "3px" }}>
+                        <button
+                          onClick={() => handleLabelAlert(log.id, "True")}
+                          style={{
+                            padding: "2px 6px",
+                            fontSize: "0.68rem",
+                            borderRadius: "3px",
+                            border: "1px solid #22c55e",
+                            background: log.label === "True" ? "#22c55e" : "#18181b",
+                            color: log.label === "True" ? "#000" : "#22c55e",
+                            fontWeight: log.label === "True" ? "bold" : "normal",
+                            cursor: "pointer",
+                          }}
+                        >
+                          True
+                        </button>
+                        <button
+                          onClick={() => handleLabelAlert(log.id, "False")}
+                          style={{
+                            padding: "2px 6px",
+                            fontSize: "0.68rem",
+                            borderRadius: "3px",
+                            border: "1px solid #ef4444",
+                            background: log.label === "False" ? "#ef4444" : "#18181b",
+                            color: log.label === "False" ? "#fff" : "#ef4444",
+                            fontWeight: log.label === "False" ? "bold" : "normal",
+                            cursor: "pointer",
+                          }}
+                        >
+                          False
+                        </button>
+                        <button
+                          onClick={() => handleLabelAlert(log.id, "Missed")}
+                          style={{
+                            padding: "2px 6px",
+                            fontSize: "0.68rem",
+                            borderRadius: "3px",
+                            border: "1px solid #eab308",
+                            background: log.label === "Missed" ? "#eab308" : "#18181b",
+                            color: log.label === "Missed" ? "#000" : "#eab308",
+                            fontWeight: log.label === "Missed" ? "bold" : "normal",
+                            cursor: "pointer",
+                          }}
+                        >
+                          Missed
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      {/* Tracked Object Decisions Log */}
       <section
         style={{
           background: "#18181b",
@@ -1240,14 +1525,15 @@ export function Tier1ReviewPage({ onBack }: { onBack: () => void }): React.React
             </select>
             <button
               onClick={handleOpenMissedModal}
+              disabled={!isLoadedData || isEvaluatingClip}
               style={{
                 padding: "4px 8px",
-                background: "#27272a",
+                background: !isLoadedData || isEvaluatingClip ? "#3f3f46" : "#27272a",
                 border: "1px solid #eab308",
                 color: "#eab308",
                 borderRadius: "4px",
                 fontSize: "0.75rem",
-                cursor: "pointer",
+                cursor: !isLoadedData || isEvaluatingClip ? "not-allowed" : "pointer",
                 fontWeight: "bold",
               }}
             >
@@ -1288,7 +1574,7 @@ export function Tier1ReviewPage({ onBack }: { onBack: () => void }): React.React
 
         {decisionLogs.length === 0 ? (
           <p style={{ color: "#71717a", fontSize: "0.8rem", margin: 0 }}>
-            No object decisions recorded yet. Play stepper or run clip evaluation to stream frame decisions.
+            No object decisions recorded yet. Run clip evaluation or play sampler to stream frame decisions.
           </p>
         ) : (
           <div style={{ maxHeight: "320px", overflowY: "auto", fontSize: "0.75rem" }}>
@@ -1389,53 +1675,6 @@ export function Tier1ReviewPage({ onBack }: { onBack: () => void }): React.React
                       </td>
                     </tr>
                   ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </section>
-
-      {/* Triggered Alerts Log with Reasons */}
-      <section style={{ background: "#18181b", borderRadius: "6px", padding: "0.8rem", border: "1px solid #27272a" }}>
-        <h2 style={{ fontSize: "0.95rem", margin: "0 0 0.5rem 0", color: "#a1a1aa" }}>
-          Triggered Alerts Log ({alertLogs.length}) &mdash; {alertsPerMin} alerts/min
-        </h2>
-        {alertLogs.length === 0 ? (
-          <p style={{ color: "#71717a", fontSize: "0.85rem", margin: 0 }}>
-            No alerts triggered. Play video to evaluate path relevance and closing speeds.
-          </p>
-        ) : (
-          <div style={{ maxHeight: "250px", overflowY: "auto", fontSize: "0.8rem" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", textAlign: "left" }}>
-              <thead>
-                <tr style={{ color: "#a1a1aa", borderBottom: "1px solid #27272a" }}>
-                  <th style={{ padding: "4px" }}>Time</th>
-                  <th style={{ padding: "4px" }}>Hazard</th>
-                  <th style={{ padding: "4px" }}>Urgency</th>
-                  <th style={{ padding: "4px" }}>Direction</th>
-                  <th style={{ padding: "4px" }}>Distance</th>
-                  <th style={{ padding: "4px" }}>Spoken (EN / HI)</th>
-                  <th style={{ padding: "4px" }}>Diagnostic Reason</th>
-                </tr>
-              </thead>
-              <tbody>
-                {alertLogs.map((log, i) => (
-                  <tr key={i} style={{ borderBottom: "1px solid #27272a" }}>
-                    <td style={{ padding: "4px", color: "#38bdf8" }}>{log.timeSec}s</td>
-                    <td style={{ padding: "4px", fontWeight: "bold" }}>{log.alert.type}</td>
-                    <td style={{ padding: "4px", color: log.alert.urgency === 3 ? "#ef4444" : "#f97316" }}>
-                      {log.alert.urgency}
-                    </td>
-                    <td style={{ padding: "4px" }}>{log.alert.direction}</td>
-                    <td style={{ padding: "4px" }}>{log.alert.distance}</td>
-                    <td style={{ padding: "4px" }}>
-                      "{log.phraseEn}" / <span style={{ color: "#facc15" }}>"{log.phraseHi}"</span>
-                    </td>
-                    <td style={{ padding: "4px", fontFamily: "monospace", color: "#a1a1aa", fontSize: "0.75rem" }}>
-                      {log.alert.reason}
-                    </td>
-                  </tr>
-                ))}
               </tbody>
             </table>
           </div>

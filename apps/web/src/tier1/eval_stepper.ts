@@ -1,17 +1,25 @@
 /**
- * Deterministic video stepper for Tier 1 clip evaluation.
+ * Deterministic video sampler and stepper for Tier 1 clip evaluation.
  *
- * Ensures:
- * 1. 0.25s deterministic steps (video.currentTime = nextTime, await seeked, detect, advance).
- * 2. Stalled video detection (timeout 2s or currentTime does not advance).
- * 3. One detection per sample time, using sample time as timestamp for tracking & closing speed.
+ * Supports:
+ * 1. requestVideoFrameCallback (rVFC) sampling as primary path:
+ *    - Plays clip muted at playbackRate 1.0.
+ *    - Samples frames when mediaTime advances by sample interval (default 0.4s, adjustable)
+ *      AND the detector is idle.
+ *    - Uses mediaTime as the timestamp for tracking, closing speed, and rules.
+ * 2. Seek-based stepper fallback when requestVideoFrameCallback is unsupported:
+ *    - Seeks in steps of sample interval with 2.0s stall timeout.
+ * 3. Video diagnostics:
+ *    - readyState, networkState, error code, duration, videoWidth/Height,
+ *      and the last 10 media events (loadeddata, seeking, seeked, canplay, stalled, error, etc.).
  * 4. HEVC detection & ffmpeg conversion instructions.
- * 5. CSV export formatting with unique id, sample time, and no duplicates.
+ * 5. Deduplicated CSV export for decisions and alerts with True/False/Missed marking.
  */
 
 import { Direction, Tier1HazardType, TrackDecisionLog } from "./types";
 
-export const DEFAULT_STEP_SEC = 0.25;
+export const DEFAULT_SAMPLE_INTERVAL_SEC = 0.4;
+export const DEFAULT_STEP_SEC = 0.4;
 export const SEEK_TIMEOUT_MS = 2000;
 
 export interface IVideoElement {
@@ -19,18 +27,116 @@ export interface IVideoElement {
   duration: number;
   paused: boolean;
   ended: boolean;
+  readyState?: number;
+  networkState?: number;
+  videoWidth?: number;
+  videoHeight?: number;
+  playbackRate?: number;
+  muted?: boolean;
+  playsInline?: boolean;
   error?: { code?: number; message?: string } | null;
+  requestVideoFrameCallback?: (
+    callback: (now: number, metadata: { mediaTime: number; presentedFrames?: number }) => void
+  ) => number;
+  cancelVideoFrameCallback?: (handle: number) => void;
+  play?: () => Promise<void> | void;
+  pause?: () => void;
   addEventListener(event: string, listener: EventListener | (() => void)): void;
   removeEventListener(event: string, listener: EventListener | (() => void)): void;
 }
 
-export interface StepperCallbacks {
+export interface VideoMediaEvent {
+  time: string;
+  event: string;
+  timestampMs: number;
+}
+
+export interface VideoDiagnostics {
+  readyState: number;
+  readyStateText: string;
+  networkState: number;
+  networkStateText: string;
+  errorCode: number | null;
+  errorMessage: string | null;
+  duration: number;
+  videoWidth: number;
+  videoHeight: number;
+  lastEvents: VideoMediaEvent[];
+}
+
+export function formatReadyState(state: number): string {
+  switch (state) {
+    case 0:
+      return "0: HAVE_NOTHING";
+    case 1:
+      return "1: HAVE_METADATA";
+    case 2:
+      return "2: HAVE_CURRENT_DATA";
+    case 3:
+      return "3: HAVE_FUTURE_DATA";
+    case 4:
+      return "4: HAVE_ENOUGH_DATA";
+    default:
+      return `${state}: UNKNOWN`;
+  }
+}
+
+export function formatNetworkState(state: number): string {
+  switch (state) {
+    case 0:
+      return "0: NETWORK_EMPTY";
+    case 1:
+      return "1: NETWORK_IDLE";
+    case 2:
+      return "2: NETWORK_LOADING";
+    case 3:
+      return "3: NETWORK_NO_SOURCE";
+    default:
+      return `${state}: UNKNOWN`;
+  }
+}
+
+/** Extract full diagnostic snapshot from video element. */
+export function extractDiagnostics(
+  video: IVideoElement,
+  lastEvents: VideoMediaEvent[] = [],
+  newEvent?: string
+): VideoDiagnostics {
+  const events = [...lastEvents];
+  if (newEvent) {
+    events.push({
+      time: `${(video.currentTime || 0).toFixed(2)}s`,
+      event: newEvent,
+      timestampMs: Date.now(),
+    });
+    if (events.length > 10) {
+      events.splice(0, events.length - 10);
+    }
+  }
+
+  const err = video.error;
+  return {
+    readyState: video.readyState ?? 0,
+    readyStateText: formatReadyState(video.readyState ?? 0),
+    networkState: video.networkState ?? 0,
+    networkStateText: formatNetworkState(video.networkState ?? 0),
+    errorCode: err?.code ?? null,
+    errorMessage: err?.message ?? null,
+    duration: video.duration || 0,
+    videoWidth: video.videoWidth || 0,
+    videoHeight: video.videoHeight || 0,
+    lastEvents: events,
+  };
+}
+
+export interface SamplerCallbacks {
   onStep: (sampleTime: number) => Promise<void>;
   onProgress?: (currentTime: number, duration: number) => void;
   onStall?: (stallMessage: string) => void;
   onError?: (errorMessage: string) => void;
   onComplete?: () => void;
   onPause?: () => void;
+  isDetectorIdle?: () => boolean;
 }
 
 /** Check if video/file is HEVC / H.265 and cannot be natively decoded. */
@@ -81,10 +187,8 @@ export async function waitForSeek(
       if (resolved) return;
       resolved = true;
       cleanup();
-      // Verify currentTime actually advanced or reached target
       const diff = Math.abs(video.currentTime - targetTime);
       if (diff > 0.1 && video.currentTime < video.duration - 0.05) {
-        // Did not reach target time
         resolve({ ok: false, stalled: true, actualTime: video.currentTime });
       } else {
         resolve({ ok: true, stalled: false, actualTime: video.currentTime });
@@ -111,20 +215,22 @@ export async function waitForSeek(
 }
 
 /**
- * Deterministic video stepper running 0.25s steps.
+ * Video clip sampler supporting requestVideoFrameCallback with seek fallback.
  */
-export class DeterministicVideoStepper {
-  private isRunning = false;
-  private isPaused = false;
-  private isCancelled = false;
-  private stepSec: number;
+export class VideoClipSampler {
+  protected isRunning = false;
+  protected isPaused = false;
+  protected isCancelled = false;
+  protected sampleIntervalSec: number;
+  protected rvfcHandle: number | null = null;
+  protected watchdogTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
-    private video: IVideoElement,
-    private callbacks: StepperCallbacks,
-    stepSec: number = DEFAULT_STEP_SEC
+    protected video: IVideoElement,
+    protected callbacks: SamplerCallbacks,
+    sampleIntervalSec: number = DEFAULT_SAMPLE_INTERVAL_SEC
   ) {
-    this.stepSec = stepSec;
+    this.sampleIntervalSec = sampleIntervalSec;
   }
 
   public getRunning(): boolean {
@@ -135,62 +241,186 @@ export class DeterministicVideoStepper {
     return this.isPaused;
   }
 
+  public getMode(): "rvfc" | "seek" {
+    return typeof this.video.requestVideoFrameCallback === "function" &&
+      typeof this.video.cancelVideoFrameCallback === "function"
+      ? "rvfc"
+      : "seek";
+  }
+
+  public setSampleInterval(intervalSec: number): void {
+    this.sampleIntervalSec = Math.max(0.05, intervalSec);
+  }
+
   public async start(startFromCurrent = false): Promise<void> {
     if (this.isRunning) return;
     this.isRunning = true;
     this.isPaused = false;
     this.isCancelled = false;
 
-    // Ensure video is not free-playing
-    this.video.paused = true;
+    if (this.getMode() === "rvfc") {
+      await this.startRvfc(startFromCurrent);
+    } else {
+      await this.startSeek(startFromCurrent);
+    }
+  }
 
-    const duration = this.video.duration || 0;
+  /**
+   * Primary sampling path via requestVideoFrameCallback.
+   */
+  private async startRvfc(startFromCurrent: boolean): Promise<void> {
+    const video = this.video;
+    video.muted = true;
+    if (video.playbackRate !== undefined) {
+      video.playbackRate = 1.0;
+    }
+
+    if (!startFromCurrent) {
+      video.currentTime = 0;
+    }
+
+    let lastSampledMediaTime = -Infinity;
+    let lastSeenMediaTime = video.currentTime;
+    let elapsedWithoutAdvanceMs = 0;
+
+    // 2s Stall Watchdog checking every 250ms
+    this.watchdogTimer = setInterval(() => {
+      if (!this.isRunning || this.isPaused || this.isCancelled) return;
+      if (video.ended) return;
+
+      elapsedWithoutAdvanceMs += 250;
+      if (elapsedWithoutAdvanceMs >= 2000) {
+        this.stop();
+        const msg = `video stalled at t=${lastSeenMediaTime.toFixed(2)}s`;
+        this.callbacks.onStall?.(msg);
+      }
+    }, 250);
+
+    // Watch for stalled event from media pipeline
+    const onStalledEvent = () => {
+      if (!this.isRunning || this.isPaused || this.isCancelled) return;
+      setTimeout(() => {
+        if (this.isRunning && elapsedWithoutAdvanceMs >= 1800) {
+          this.stop();
+          this.callbacks.onStall?.(`video stalled at t=${video.currentTime.toFixed(2)}s`);
+        }
+      }, 500);
+    };
+    video.addEventListener("stalled", onStalledEvent);
+
+    const onFrame = (_now: number, metadata: { mediaTime: number; presentedFrames?: number }) => {
+      if (!this.isRunning || this.isPaused || this.isCancelled) return;
+
+      // Immediately queue next rVFC so no frames are dropped
+      this.rvfcHandle = video.requestVideoFrameCallback!(onFrame);
+
+      const mediaTime = metadata?.mediaTime ?? video.currentTime;
+      const duration = video.duration || 0;
+
+      // Update watchdog on progress
+      if (mediaTime > lastSeenMediaTime + 0.005) {
+        lastSeenMediaTime = mediaTime;
+        elapsedWithoutAdvanceMs = 0;
+      }
+
+      if (video.ended || (duration > 0 && mediaTime >= duration - 0.05)) {
+        this.stop();
+        video.removeEventListener("stalled", onStalledEvent);
+        this.callbacks.onComplete?.();
+        return;
+      }
+
+      if (video.error) {
+        this.stop();
+        video.removeEventListener("stalled", onStalledEvent);
+        this.callbacks.onError?.(
+          `Video error: ${video.error.message || `Code ${video.error.code}`}`
+        );
+        return;
+      }
+
+      // Check mediaTime advancement against sample interval AND detector idle
+      const timeDelta = mediaTime - lastSampledMediaTime;
+      const isIdle = this.callbacks.isDetectorIdle ? this.callbacks.isDetectorIdle() : true;
+
+      if (timeDelta >= this.sampleIntervalSec - 0.01 && isIdle) {
+        lastSampledMediaTime = mediaTime;
+        Promise.resolve(this.callbacks.onStep(mediaTime))
+          .then(() => {
+            this.callbacks.onProgress?.(mediaTime, duration);
+          })
+          .catch((err) => {
+            this.stop();
+            video.removeEventListener("stalled", onStalledEvent);
+            this.callbacks.onError?.(`Step error at t=${mediaTime.toFixed(2)}s: ${String(err)}`);
+          });
+      }
+    };
+
+    this.rvfcHandle = video.requestVideoFrameCallback!(onFrame);
+
+    if (video.play) {
+      try {
+        await video.play();
+      } catch (err) {
+        this.stop();
+        video.removeEventListener("stalled", onStalledEvent);
+        this.callbacks.onError?.(`Failed to start video playback: ${String(err)}`);
+      }
+    }
+  }
+
+  /**
+   * Fallback sampling path via seeking when rVFC is not available.
+   */
+  private async startSeek(startFromCurrent: boolean): Promise<void> {
+    const video = this.video;
+    video.paused = true;
+
+    const duration = video.duration || 0;
     let sampleTime = startFromCurrent
-      ? Math.round(this.video.currentTime / this.stepSec) * this.stepSec
+      ? Math.round(video.currentTime / this.sampleIntervalSec) * this.sampleIntervalSec
       : 0.0;
 
     sampleTime = Math.round(sampleTime * 100) / 100;
 
     while (this.isRunning && !this.isCancelled && !this.isPaused) {
-      if (this.video.ended || (duration > 0 && sampleTime > duration)) {
+      if (video.ended || (duration > 0 && sampleTime > duration)) {
         this.isRunning = false;
         this.callbacks.onComplete?.();
         break;
       }
 
-      if (this.video.error) {
+      if (video.error) {
         this.isRunning = false;
         this.callbacks.onError?.(
-          `Video playback error: ${this.video.error.message || `Code ${this.video.error.code}`}`
+          `Video playback error: ${video.error.message || `Code ${video.error.code}`}`
         );
         break;
       }
 
-      const prevTime = this.video.currentTime;
-      this.video.currentTime = sampleTime;
+      const prevTime = video.currentTime;
+      video.currentTime = sampleTime;
 
-      // Wait for seeked event or stall timeout
-      const seekResult = await waitForSeek(this.video, sampleTime, SEEK_TIMEOUT_MS);
-
+      const seekResult = await waitForSeek(video, sampleTime, SEEK_TIMEOUT_MS);
       if (this.isCancelled || this.isPaused) break;
 
       if (!seekResult.ok && seekResult.stalled) {
-        // CurrentTime did not advance after seek within 2s
         this.isRunning = false;
-        const msg = `video stalled at t=${this.video.currentTime.toFixed(2)}s`;
-        this.callbacks.onStall?.(msg);
+        this.callbacks.onStall?.(`video stalled at t=${video.currentTime.toFixed(2)}s`);
         break;
       }
 
-      // Check if currentTime did not advance between successive non-initial steps
-      if (sampleTime > 0 && Math.abs(this.video.currentTime - prevTime) < 0.001 && sampleTime < duration - 0.05) {
+      if (
+        sampleTime > 0 &&
+        Math.abs(video.currentTime - prevTime) < 0.001 &&
+        sampleTime < duration - 0.05
+      ) {
         this.isRunning = false;
-        const msg = `video stalled at t=${this.video.currentTime.toFixed(2)}s`;
-        this.callbacks.onStall?.(msg);
+        this.callbacks.onStall?.(`video stalled at t=${video.currentTime.toFixed(2)}s`);
         break;
       }
 
-      // Run detector once for this exact sample time
       try {
         await this.callbacks.onStep(sampleTime);
         this.callbacks.onProgress?.(sampleTime, duration);
@@ -200,8 +430,7 @@ export class DeterministicVideoStepper {
         break;
       }
 
-      // Advance to next sample time
-      sampleTime = Math.round((sampleTime + this.stepSec) * 100) / 100;
+      sampleTime = Math.round((sampleTime + this.sampleIntervalSec) * 100) / 100;
     }
 
     if (this.isPaused) {
@@ -213,6 +442,9 @@ export class DeterministicVideoStepper {
     if (!this.isRunning) return;
     this.isPaused = true;
     this.isRunning = false;
+    this.cleanupRvfc();
+    this.video.pause?.();
+    this.callbacks.onPause?.();
   }
 
   public resume(): void {
@@ -224,19 +456,33 @@ export class DeterministicVideoStepper {
     this.isCancelled = true;
     this.isRunning = false;
     this.isPaused = false;
+    this.cleanupRvfc();
+    this.video.pause?.();
+    this.video.currentTime = 0;
   }
 
-  public async stepOnce(forward = true): Promise<void> {
-    const delta = forward ? this.stepSec : -this.stepSec;
-    const target = Math.max(0, Math.round((this.video.currentTime + delta) / this.stepSec) * this.stepSec);
-    this.video.currentTime = target;
-    const res = await waitForSeek(this.video, target, SEEK_TIMEOUT_MS);
-    if (res.ok) {
-      await this.callbacks.onStep(target);
-      this.callbacks.onProgress?.(target, this.video.duration || 0);
+  public stop(): void {
+    this.isRunning = false;
+    this.cleanupRvfc();
+    this.video.pause?.();
+  }
+
+  private cleanupRvfc(): void {
+    if (this.watchdogTimer !== null) {
+      clearInterval(this.watchdogTimer);
+      this.watchdogTimer = null;
+    }
+    if (this.rvfcHandle !== null && this.video.cancelVideoFrameCallback) {
+      this.video.cancelVideoFrameCallback(this.rvfcHandle);
+      this.rvfcHandle = null;
     }
   }
 }
+
+/**
+ * Backward compatibility alias for DeterministicVideoStepper.
+ */
+export class DeterministicVideoStepper extends VideoClipSampler {}
 
 /**
  * Format decision logs into clean CSV without duplicates, including unique id and sample time.
@@ -245,13 +491,22 @@ export function formatDecisionsToCsv(
   decisions: TrackDecisionLog[],
   fallbackClipName = "clip"
 ): string {
-  const headers = ["id", "clip", "sample_time", "t", "class", "direction", "decision", "reason", "label"];
+  const headers = [
+    "id",
+    "clip",
+    "sample_time",
+    "t",
+    "class",
+    "direction",
+    "decision",
+    "reason",
+    "label",
+  ];
 
   const seenIds = new Set<string>();
   const rows: string[] = [];
 
   for (const d of decisions) {
-    // Deduplicate exact log IDs if any
     if (seenIds.has(d.id)) continue;
     seenIds.add(d.id);
 
@@ -272,6 +527,60 @@ export function formatDecisionsToCsv(
       ].join(",")
     );
   }
+
+  return [headers.join(","), ...rows].join("\n");
+}
+
+/**
+ * Format triggered alerts log into CSV with labels for True/False/Missed analysis.
+ */
+export function formatAlertsToCsv(
+  alerts: Array<{
+    id?: string;
+    timeSec: number;
+    alert: {
+      type: string;
+      direction: string;
+      distance: string;
+      urgency: number;
+      reason?: string;
+      confidence?: number;
+    };
+    phraseEn: string;
+    phraseHi: string;
+    label?: string;
+  }>,
+  clipName = "clip"
+): string {
+  const headers = [
+    "id",
+    "clip",
+    "time_sec",
+    "type",
+    "direction",
+    "distance",
+    "urgency",
+    "phrase_en",
+    "phrase_hi",
+    "label",
+    "reason",
+  ];
+
+  const rows = alerts.map((a, i) =>
+    [
+      JSON.stringify(a.id || `alert_${a.timeSec.toFixed(2)}_${a.alert.type}_${i}`),
+      JSON.stringify(clipName),
+      a.timeSec.toFixed(2),
+      JSON.stringify(a.alert.type),
+      JSON.stringify(a.alert.direction),
+      JSON.stringify(a.alert.distance),
+      a.alert.urgency,
+      JSON.stringify(a.phraseEn),
+      JSON.stringify(a.phraseHi),
+      JSON.stringify(a.label || ""),
+      JSON.stringify(a.alert.reason || ""),
+    ].join(",")
+  );
 
   return [headers.join(","), ...rows].join("\n");
 }
@@ -299,4 +608,3 @@ export function createMissedHazardLog(
     trackId: -1,
   };
 }
-
