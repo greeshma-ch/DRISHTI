@@ -33,6 +33,8 @@ interface FrameUsage {
   input_tokens?: number;
   output_tokens?: number;
   est_cost_usd?: number;
+  retries_display?: string;
+  median_reasoning_tokens?: number;
 }
 
 interface PerceptionResponse {
@@ -49,6 +51,8 @@ interface PerceptionResponse {
   server_total_ms?: number;
   meta_ms?: number;
   finish_reason?: string;
+  retries_display?: string;
+  median_reasoning_tokens?: number;
 }
 
 interface FrameDurations {
@@ -111,6 +115,8 @@ function MainApp() {
   const [statusMsg, setStatusMsg] = useState("Ready");
   const [lastLatency, setLastLatency] = useState<number | null>(null);
   const [finishReason, setFinishReason] = useState<string>("--");
+  const [retriesDisplay, setRetriesDisplay] = useState<string>("0 / 0");
+  const [medianReasoningTokens, setMedianReasoningTokens] = useState<number>(0);
   const [inputTokens, setInputTokens] = useState<number>(0);
   const [outputTokens, setOutputTokens] = useState<number>(0);
   const [estCost, setEstCost] = useState<number>(0);
@@ -345,6 +351,10 @@ function MainApp() {
 
           setLastLatency(data.latency_ms);
           setFinishReason(data.finish_reason || data.usage?.finish_reason || "stop");
+          const retries = data.retries_display || data.usage?.retries_display || "0 / 0";
+          const medReasoning = data.median_reasoning_tokens ?? data.usage?.median_reasoning_tokens ?? 0;
+          setRetriesDisplay(retries);
+          setMedianReasoningTokens(medReasoning);
           const inT = data.usage?.input_tokens ?? 0;
           const outT = data.usage?.output_tokens ?? 0;
           const cost = data.usage?.est_cost_usd ?? 0;
@@ -936,6 +946,12 @@ function MainApp() {
             <strong style={{ color: finishReason === "length" ? "#ef4444" : "#38bdf8" }}>
               {finishReason}
             </strong>
+          </div>
+          <div>
+            Retries / Frames: <strong style={{ color: "#facc15" }}>{retriesDisplay}</strong>
+          </div>
+          <div>
+            Median Reasoning: <strong style={{ color: "#38bdf8" }}>{medianReasoningTokens} tok</strong>
           </div>
           <div>
             Output Tokens: <strong style={{ color: "#facc15" }}>{outputTokens}</strong>

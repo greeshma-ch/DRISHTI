@@ -73,43 +73,35 @@ Throttle levels are defined in AGENTS.md (warn $60, throttle $90, block dev call
 | Nov 01 | P3 Real-Phone Safety & Hardening | AGENTS.md Rule 8 (no lateral moves for moving hazards); caution+position phrases; 4-frame debounce, 3 consecutive closing steps; side-passing silent; lens blocked & dark frame detection; Tier 2 exponential backoff (2,4,8,15s) with single Vision limited alert; 320px downscaled WebGL worker |
 | Nov 01 | P3 Verification & Live Benchmarking | Removed placeholder benchmark table; added live 100-frame browser benchmark (WebGL & WASM with SIMD, 256/320px); live clip evaluation tool for alerts/min; "Camera blocked or too close, stop" halting alert; verified against white wall, dim corridor, shaded street |
 | Nov 01 | Tier 1 Slow-Phone Hardening & Verifiable Decisions | Time-based rules (0.8s tracked, 0.6s sustained closing; vehicle alerts in 0.8s <= 1.5s @ 2.5 FPS); decision logging (alerted vs suppressed) & CSV export; live clip pipeline; 192/256px resolution; skip Tier 2 when busy/blocked; stairs prompt & verification script |
+| Nov 01 | Tier 1 Deterministic Stepper & Evaluation (Task A) | Deterministic 0.25s video stepper via seeked events; stall detector (2s timeout); deduplicated decision logs (logged on state change); capped 200 row display; missed hazard logging; HEVC alert banner |
+| Nov 01 | Tier 2 Truncation Reduction & Monitoring (Task B) | First attempt max_tokens=800, retry=1200; shortened prompt with one-line JSON example; retries/total frames and median reasoning tokens in /status and Debug Overlay; >10% retry warning |
 
 ## Current session
 
-- Working on: Tier 1 Slow-Phone Optimization, Verifiable Decision Logging, & Tier 2 Stairs Verification (COMPLETED)
+- Working on: Task A (Deterministic Stepper & Clip Eval) and Task B (Tier 2 Truncation Reduction & Monitoring) (COMPLETED)
 - Done this session:
-  - **Time-Based Tier 1 Rules for Low-FPS Phones (Item 1)**:
-    - Replaced frame-count heuristics with time-based rules:
-      - `minTrackDurationSec`: 0.8 s (moving objects must be tracked for >= 0.8 s).
-      - `minClosingDurationSec`: 0.6 s (closing speed must be sustained for >= 0.6 s).
-      - `staticMinTrackDurationSec`: 0.4 s debounce for static obstacles.
-    - Verified at 2.5 FPS (400 ms frame intervals): an approaching vehicle from mid distance alerts at $t = 0.8$ s, well under the 1.5 s requirement.
-  - **Comprehensive Decision Logging & CSV Export on `/#tier1` (Item 2)**:
-    - Recorded every tracked object's evaluation decision per frame (`TrackDecisionLog`): `"alerted"` or `"suppressed: <rule>"`, with timestamp, class, direction, and detailed diagnostic reason.
-    - Added interactive decision table on `/#tier1` with **True / False / Missed** ground-truth buttons per row.
-    - Added **"Export CSV"** button exporting: `clip, t, class, direction, decision, reason, label`.
-  - **Unified Live Clip Evaluation Pipeline (Item 3)**:
-    - Removed any simplified/mock approximation paths for clip review.
-    - Clip evaluation runs the exact production pipeline: Web Worker detector, IoU + centroid tracker, and live `PriorityArbiter`.
-  - **Speed & Resolution Exploration (Item 4)**:
-    - Added support for 192 px, 256 px, and 320 px input sizes in detector worker and review page controls.
-    - Camera config set to 640x360 @ 15 fps (`frameRate: { ideal: 15, max: 15 }`).
-    - Evaluated MediaPipe EfficientDet-Lite0 GPU delegate: ~32-38 ms latency and 4.4MB binary overhead vs tfjs lite_mobilenet_v2 (~14-18 ms @ 192px, ~20-25 ms @ 256px). As MediaPipe was not > 2x faster, tfjs was retained per specification.
-    - Added guard skipping Tier 2 uploads while Tier 1 worker is busy (`tier1DetectorRef.current?.isBusy()`).
-  - **Tier 2 Lens-Blocked Pause (Item 5)**:
-    - Added guard pausing all Tier 2 cloud requests while lens is blocked (`isCameraBlockedRef.current`).
-  - **Stairs Prompt Hardening & Verification Script (Item 6)**:
-    - Explicitly mentioned *"stairs up or down, drop-offs, potholes, or obstacles"* in `server/meta_client.py` system and user prompts.
-    - Created `scripts/check_clip_hazards.py` using OpenCV to sample 10 evenly spaced frames from any clip (or generate synthetic stairs test frames) and submit to `/frame`, outputting a clean summary table of detected hazards.
-  - **Tests & Quality Verification**:
-    - `vitest run`: 100 passing tests across 7 test files in `apps/web`.
-    - `tsc --noEmit`: 0 errors.
-    - `npm run lint`: 0 errors (31 acceptable test warnings).
-    - `npm run build`: successful production build.
-    - `pytest server/tests`: 25 passing tests in 0.96s.
+  - **Task A (Committed `2df3c2e`)**:
+    - Replaced free-play loop with deterministic stepper (0.25 s steps via `video.currentTime`, awaiting `seeked`, single detection per sample time, sample time as timestamp).
+    - Added stall detection on seek failure (2s timeout, reporting "video stalled at t=...") and Cancel button.
+    - Logged decisions once per tracked object per decision change; capped on-screen list to 200 rows with counter; exported all rows to CSV with unique ID.
+    - Added "Mark missed hazard" during playback recording `(clip, t, type, direction, label="missed")` with True/False buttons for alerts.
+    - Added HEVC format detection with ffmpeg conversion banner.
+    - Unit tests in `apps/web/src/tier1/eval_stepper.test.ts`.
+  - **Task B (Committed separately)**:
+    - Set first attempt `max_tokens = 800` (billed on tokens used), retry `max_tokens = 1200`.
+    - Shortened `SYSTEM_PROMPT` to ask for single most urgent hazard only with a one-line JSON example.
+    - Added `get_perception_stats()` and `@app.get("/status")` returning `retries`, `total_frames`, `retries_display`, `median_reasoning_tokens`, and spend.
+    - Added >10% retry warning logging (`High Tier 2 retry rate: ...`).
+    - Added Retries / Frames (`0 / 0`) and Median Reasoning Tokens display to Web App Debug Overlay and `/frame` response payload.
+    - Unit tests in `server/tests/test_frame.py` for 800/1200 token limits, `/status`, and high retry warning logging.
+  - **Verification**:
+    - `pytest server/tests`: 28 passed in 1.18s.
     - `ruff check server`: 0 errors.
     - `mypy server`: 0 errors.
-    - `ruff check scripts/check_clip_hazards.py`: 0 errors.
+    - `vitest run`: 106 passed across 8 test suites.
+    - `tsc --noEmit`: 0 errors.
+    - `npm run lint`: 0 errors.
+    - `npm run build`: built in 17.06s.
 - Next: P4 Tier 2 hardening, rate limiter, spend guard.
 - Blockers: None
 

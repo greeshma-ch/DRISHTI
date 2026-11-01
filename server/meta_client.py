@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import statistics
 import time
 from pathlib import Path
 from typing import Any
@@ -163,6 +164,9 @@ VISION_LIMITED_RESULT = PerceptionResult(
 )
 
 _consecutive_parse_failures: int = 0
+_total_frames: int = 0
+_retry_frames: int = 0
+_reasoning_tokens_history: list[int] = []
 
 
 def reset_parse_failures() -> None:
@@ -170,16 +174,43 @@ def reset_parse_failures() -> None:
     _consecutive_parse_failures = 0
 
 
+def get_perception_stats() -> dict[str, Any]:
+    global _total_frames, _retry_frames, _reasoning_tokens_history
+    med = (
+        float(statistics.median(_reasoning_tokens_history))
+        if _reasoning_tokens_history
+        else 0.0
+    )
+    ratio = (_retry_frames / _total_frames) if _total_frames > 0 else 0.0
+    return {
+        "total_frames": _total_frames,
+        "retry_frames": _retry_frames,
+        "retries_display": f"{_retry_frames} / {_total_frames}",
+        "retry_ratio": round(ratio, 4),
+        "retry_percent": round(ratio * 100, 1),
+        "median_reasoning_tokens": round(med, 1),
+        "consecutive_parse_failures": _consecutive_parse_failures,
+    }
+
+
+def reset_perception_stats() -> None:
+    global _total_frames, _retry_frames, _reasoning_tokens_history, _consecutive_parse_failures
+    _total_frames = 0
+    _retry_frames = 0
+    _consecutive_parse_failures = 0
+    _reasoning_tokens_history.clear()
+
+
 SYSTEM_PROMPT = (
-    "You are Drishti, an AI walking companion. "
-    "Identify the single most urgent imminent hazard in the walking path, "
-    "especially stairs up or down, drop-offs, potholes, or obstacles. "
+    "You are Drishti walking companion. "
+    "Identify the single most urgent imminent hazard in path "
+    "(stairs up or down, drop-offs, obstacles). "
     "Return ONLY JSON: "
     '{"hazard":{"type":"chair|table|bench|door|wall|pole|tree_branch|vehicle|rickshaw|'
     'bicycle|person|animal|stairs|step_down|pothole|open_drain|construction|plant|bag|other",'
     '"direction":"left|center|right","distance":"near|mid|far",'
     '"clear_side":"left|right|none","label":"max 2 words if other","urgency":0-3}} '
-    'or {"hazard":null} if no hazard.'
+    'or {"hazard":null}'
 )
 
 
@@ -319,7 +350,7 @@ async def analyze_frame(
     client: httpx.AsyncClient | None = None,
 ) -> tuple[PerceptionResult, dict[str, Any], float, dict[str, float]]:
     """Call Meta Model API with image and return (result, usage_dict, latency_ms, timings)."""
-    global _consecutive_parse_failures
+    global _consecutive_parse_failures, _total_frames, _retry_frames, _reasoning_tokens_history
     current_spend = get_total_spend()
     now_ts = time.time()
     if current_spend >= 120.0 and not settings.FINAL_RUN:
@@ -331,8 +362,10 @@ async def analyze_frame(
             {"meta_call_start": now_ts, "meta_call_end": now_ts},
         )
 
+    _total_frames += 1
+    did_retry = False
     b64_image = base64.b64encode(image_bytes).decode("utf-8")
-    user_prompt = "Identify most urgent hazard, including stairs up or down."
+    user_prompt = "Return single most urgent hazard only: {\"hazard\":{...}} or {\"hazard\":null}."
 
     def make_payload(max_tokens: int) -> dict[str, Any]:
         return {
@@ -376,8 +409,8 @@ async def analyze_frame(
         return resp.json(), t0, t1
 
     try:
-        # First attempt: max_tokens = 450
-        raw_json, m_start, m_end = await call_api(max_tokens=450)
+        # First attempt: max_tokens = 800
+        raw_json, m_start, m_end = await call_api(max_tokens=800)
         meta_call_start, meta_call_end = m_start, m_end
         latency_ms = round((time.perf_counter() - start_time) * 1000, 1)
 
@@ -392,14 +425,16 @@ async def analyze_frame(
             if candidate.status != "unknown":
                 parsed = candidate
 
-        # Retry once with max_tokens 700 if length cutoff, empty content, or parse failure
+        # Retry once with max_tokens 1200 if length cutoff, empty content, or parse failure
         if parsed is None:
+            did_retry = True
+            _retry_frames += 1
             logger.warning(
-                "First attempt failed (finish_reason=%s, empty=%s); retry max_tokens=700",
+                "First attempt failed (finish_reason=%s, empty=%s); retry max_tokens=1200",
                 finish_reason,
                 not bool(content.strip()),
             )
-            raw_json, m_start, m_end = await call_api(max_tokens=700)
+            raw_json, m_start, m_end = await call_api(max_tokens=1200)
             meta_call_end = m_end
             latency_ms = round((time.perf_counter() - start_time) * 1000, 1)
 
@@ -412,17 +447,42 @@ async def analyze_frame(
                 if candidate.status != "unknown":
                     parsed = candidate
 
+        # Requirement B4: If more than 10 percent of frames need a retry, log a warning
+        if _total_frames > 0 and (_retry_frames / _total_frames) > 0.10:
+            logger.warning(
+                "High Tier 2 retry rate: %.1f%% (%d/%d frames required a retry)",
+                (_retry_frames / _total_frames) * 100,
+                _retry_frames,
+                _total_frames,
+            )
+
         usage = raw_json.get("usage", {})
         input_tokens = int(usage.get("prompt_tokens", 0))
         output_tokens = int(usage.get("completion_tokens", 0))
+        details = usage.get("completion_tokens_details") or {}
+        reasoning_tokens = int(
+            details.get("reasoning_tokens") or usage.get("reasoning_tokens") or 0
+        )
+        _reasoning_tokens_history.append(reasoning_tokens)
+        med_reasoning = (
+            float(statistics.median(_reasoning_tokens_history))
+            if _reasoning_tokens_history
+            else 0.0
+        )
         est_cost = calculate_cost(settings.SPARK_MODEL, input_tokens, output_tokens, images=1)
         record_spend(settings.SPARK_MODEL, input_tokens, output_tokens, 1, est_cost)
 
         usage_info = {
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
+            "reasoning_tokens": reasoning_tokens,
+            "median_reasoning_tokens": round(med_reasoning, 1),
             "est_cost_usd": est_cost,
             "finish_reason": finish_reason,
+            "retries_count": _retry_frames,
+            "total_frames": _total_frames,
+            "retries_display": f"{_retry_frames} / {_total_frames}",
+            "did_retry": did_retry,
         }
 
         if parsed is not None:

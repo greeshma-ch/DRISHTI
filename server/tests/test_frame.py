@@ -10,15 +10,18 @@ from httpx import ASGITransport, AsyncClient, Response
 
 from server.app import app
 from server.meta_client import (
+    SYSTEM_PROMPT,
     UNKNOWN_RESULT,
     Hazard,
     PerceptionResult,
     analyze_frame,
     calculate_cost,
+    get_perception_stats,
     get_total_spend,
     parse_perception_response,
     record_spend,
     reset_parse_failures,
+    reset_perception_stats,
 )
 from server.phrases import build_phrase, get_system_message
 
@@ -259,7 +262,8 @@ async def test_analyze_frame_with_mock_client() -> None:
 @pytest.mark.asyncio
 async def test_truncated_response_retries_and_returns_unknown_if_still_truncated() -> None:
     reset_parse_failures()
-    # Mock where both attempts (450 and 700 tokens) hit finish_reason="length"
+    reset_perception_stats()
+    # Mock where both attempts (800 and 1200 tokens) hit finish_reason="length"
     length_response = {
         "choices": [
             {
@@ -267,7 +271,11 @@ async def test_truncated_response_retries_and_returns_unknown_if_still_truncated
                 "message": {"content": ""},
             }
         ],
-        "usage": {"prompt_tokens": 328, "completion_tokens": 450},
+        "usage": {
+            "prompt_tokens": 328,
+            "completion_tokens": 800,
+            "completion_tokens_details": {"reasoning_tokens": 150},
+        },
     }
     mock_http = AsyncMock()
     req = httpx.Request("POST", "http://test")
@@ -278,20 +286,23 @@ async def test_truncated_response_retries_and_returns_unknown_if_still_truncated
     )
 
     assert mock_http.post.call_count == 2
-    # First attempt: max_tokens=450
-    assert mock_http.post.call_args_list[0].kwargs["json"]["max_tokens"] == 450
-    # Second attempt: max_tokens=700
-    assert mock_http.post.call_args_list[1].kwargs["json"]["max_tokens"] == 700
+    # First attempt: max_tokens=800
+    assert mock_http.post.call_args_list[0].kwargs["json"]["max_tokens"] == 800
+    # Second attempt: max_tokens=1200
+    assert mock_http.post.call_args_list[1].kwargs["json"]["max_tokens"] == 1200
 
     assert result.status == "unknown"
     assert result.instruction == "unknown"
     assert result.path_clear is False
     assert usage["finish_reason"] == "length"
+    assert usage["retries_display"] == "1 / 1"
+    assert usage["median_reasoning_tokens"] == 150.0
 
 
 @pytest.mark.asyncio
 async def test_retry_recovers_when_first_attempt_truncated() -> None:
     reset_parse_failures()
+    reset_perception_stats()
     first_response = {
         "choices": [
             {
@@ -299,7 +310,11 @@ async def test_retry_recovers_when_first_attempt_truncated() -> None:
                 "message": {"content": ""},
             }
         ],
-        "usage": {"prompt_tokens": 328, "completion_tokens": 450},
+        "usage": {
+            "prompt_tokens": 328,
+            "completion_tokens": 800,
+            "completion_tokens_details": {"reasoning_tokens": 200},
+        },
     }
     second_response = {
         "choices": [
@@ -317,7 +332,11 @@ async def test_retry_recovers_when_first_attempt_truncated() -> None:
                 },
             }
         ],
-        "usage": {"prompt_tokens": 328, "completion_tokens": 480},
+        "usage": {
+            "prompt_tokens": 328,
+            "completion_tokens": 480,
+            "completion_tokens_details": {"reasoning_tokens": 100},
+        },
     }
 
     mock_http = AsyncMock()
@@ -334,8 +353,8 @@ async def test_retry_recovers_when_first_attempt_truncated() -> None:
     )
 
     assert mock_http.post.call_count == 2
-    assert mock_http.post.call_args_list[0].kwargs["json"]["max_tokens"] == 450
-    assert mock_http.post.call_args_list[1].kwargs["json"]["max_tokens"] == 700
+    assert mock_http.post.call_args_list[0].kwargs["json"]["max_tokens"] == 800
+    assert mock_http.post.call_args_list[1].kwargs["json"]["max_tokens"] == 1200
     assert result.status == "hazard"
     assert result.hazard is not None
     assert result.hazard.type == "pole"
@@ -375,6 +394,8 @@ async def test_frame_endpoint() -> None:
             assert body["usage"]["input_tokens"] == 328
             assert body["finish_reason"] == "stop"
             assert body["client_timestamp"] == 1730300000.123
+            assert body["retries_display"] == "0 / 0"
+            assert body["median_reasoning_tokens"] == 0.0
             assert "server_total_ms" in body
             assert "meta_ms" in body
 
@@ -546,3 +567,62 @@ def test_system_messages_camera_blocked_and_clear() -> None:
         get_system_message("vision_limited_moving_only", lang="hi")
         == "दृष्टि सीमित, केवल गतिमान वस्तुएँ"
     )
+
+
+@pytest.mark.asyncio
+async def test_status_endpoint() -> None:
+    reset_perception_stats()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        assert "retries" in data
+        assert "total_frames" in data
+        assert "retries_display" in data
+        assert "median_reasoning_tokens" in data
+        assert "spend" in data
+
+
+@pytest.mark.asyncio
+async def test_high_retry_warning_logged(caplog: pytest.LogCaptureFixture) -> None:
+    reset_perception_stats()
+    # Mock where first attempt fails (triggering retry)
+    first_response = {
+        "choices": [{"finish_reason": "length", "message": {"content": ""}}],
+        "usage": {"prompt_tokens": 100, "completion_tokens": 800},
+    }
+    second_response = {
+        "choices": [{
+            "finish_reason": "stop",
+            "message": {"content": json.dumps({"hazard": None})},
+        }],
+        "usage": {"prompt_tokens": 100, "completion_tokens": 20},
+    }
+    mock_http = AsyncMock()
+    req = httpx.Request("POST", "http://test")
+    mock_http.post = AsyncMock(
+        side_effect=[
+            Response(200, json=first_response, request=req),
+            Response(200, json=second_response, request=req),
+        ]
+    )
+
+    with caplog.at_level("WARNING"):
+        await analyze_frame(b"dummyimage", client=mock_http)
+
+    stats = get_perception_stats()
+    assert stats["total_frames"] == 1
+    assert stats["retry_frames"] == 1
+    assert stats["retries_display"] == "1 / 1"
+    # 1 retry out of 1 frame is 100% > 10%
+    assert any("High Tier 2 retry rate" in record.message for record in caplog.records)
+
+
+def test_system_prompt_shortened() -> None:
+    # Verify system prompt asks for single most urgent hazard only and has one-line JSON example
+    assert "single most urgent" in SYSTEM_PROMPT.lower()
+    assert '{"hazard":null}' in SYSTEM_PROMPT
+    assert '{"hazard":{"type":' in SYSTEM_PROMPT
+

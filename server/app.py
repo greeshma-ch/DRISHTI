@@ -9,7 +9,7 @@ from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
-from .meta_client import analyze_frame, get_total_spend
+from .meta_client import analyze_frame, get_perception_stats, get_total_spend
 
 app = FastAPI(title="Drishti", version="0.0.1")
 
@@ -54,6 +54,22 @@ async def spend() -> dict[str, object]:
     }
 
 
+@app.get("/status")
+async def server_status() -> dict[str, object]:
+    stats = get_perception_stats()
+    spend_data = await spend()
+    return {
+        "status": "ok",
+        "retries": stats["retry_frames"],
+        "total_frames": stats["total_frames"],
+        "retries_display": stats["retries_display"],
+        "retry_ratio": stats["retry_ratio"],
+        "retry_percent": stats["retry_percent"],
+        "median_reasoning_tokens": stats["median_reasoning_tokens"],
+        "spend": spend_data,
+    }
+
+
 @app.post("/frame")
 async def process_frame(
     file: UploadFile = File(...),
@@ -73,4 +89,6 @@ async def process_frame(
         "server_total_ms": server_total_ms,
         "meta_ms": latency_ms,
         "finish_reason": usage.get("finish_reason", "stop"),
+        "retries_display": usage.get("retries_display", "0 / 0"),
+        "median_reasoning_tokens": usage.get("median_reasoning_tokens", 0.0),
     }
