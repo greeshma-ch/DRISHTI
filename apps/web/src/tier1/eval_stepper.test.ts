@@ -6,6 +6,7 @@ import {
   VideoClipSampler,
   IVideoElement,
   calculateDecisionSummary,
+  computeSampleSpacingStats,
   createMissedHazardLog,
   extractDiagnostics,
   formatAlertsToCsv,
@@ -931,6 +932,66 @@ describe("Tier 1 Android Chrome Hardware Sampling & Eval Stepper (Req 1-5)", () 
       expect(lines[2]).toContain('"Correct silence"');
       expect(lines[3]).toContain('"False alert"');
       expect(lines[4]).toContain('"Should have alerted"');
+    });
+  });
+
+  describe("8. Offline Clip Evaluation & Sample Spacing Telemetry (Requirement 1)", () => {
+    it("computes sample spacing statistics and warns when median > 0.6s", () => {
+      // Normal 0.4s spacing
+      const normalSpacings = [0.38, 0.40, 0.42, 0.40, 0.39, 0.41];
+      const statsNormal = computeSampleSpacingStats(normalSpacings);
+      expect(statsNormal.min).toBe(0.38);
+      expect(statsNormal.median).toBe(0.40);
+      expect(statsNormal.max).toBe(0.42);
+      expect(statsNormal.count).toBe(6);
+      expect(statsNormal.warning).toBe(false);
+
+      // Irregular slow spacing (median > 0.6s) as reported by user on real phone (1.2 - 2.8s)
+      const slowSpacings = [1.2, 1.8, 2.4, 2.8, 1.5];
+      const statsSlow = computeSampleSpacingStats(slowSpacings);
+      expect(statsSlow.min).toBe(1.2);
+      expect(statsSlow.median).toBe(1.8);
+      expect(statsSlow.max).toBe(2.8);
+      expect(statsSlow.warning).toBe(true);
+
+      // Empty spacings
+      const statsEmpty = computeSampleSpacingStats([]);
+      expect(statsEmpty.min).toBe(0);
+      expect(statsEmpty.median).toBe(0);
+      expect(statsEmpty.max).toBe(0);
+      expect(statsEmpty.warning).toBe(false);
+    });
+
+    it("runs offline clip evaluation deterministically on exact 0.4s grid (Req 1)", async () => {
+      const mockVideo = new MockVideoElement(true);
+      mockVideo.duration = 1.6;
+
+      const sampledGridTimes: number[] = [];
+      const actualTimes: number[] = [];
+
+      const sampler = new VideoClipSampler(
+        mockVideo,
+        {
+          onStep: async (sampleTime, actualTime) => {
+            sampledGridTimes.push(sampleTime);
+            if (actualTime !== undefined) {
+              actualTimes.push(actualTime);
+            }
+            const next = Math.round((sampleTime + 0.4) * 100) / 100;
+            if (next <= 1.6) {
+              setTimeout(() => mockVideo.stepRvfc(next), 0);
+            }
+          },
+        },
+        0.4
+      );
+
+      // Start in offline eval mode
+      await sampler.start(false, true);
+
+      // Confirmed: evaluated on exact 0.4s grid regardless of execution timing!
+      expect(sampledGridTimes).toEqual([0.0, 0.4, 0.8, 1.2, 1.6]);
+      expect(actualTimes).toEqual([0.0, 0.4, 0.8, 1.2, 1.6]);
     });
   });
 });

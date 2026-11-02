@@ -631,4 +631,84 @@ describe("Tier 1 Math & Rules", () => {
       expect(spoken.length).toBe(1);
     });
   });
+
+  describe("12. Live mode gap tolerance (Requirement 2)", () => {
+    const W = 640;
+    const H = 360;
+
+    it("tolerates ~0.5s gaps between frames, preserving track ID and accumulating tracked duration", () => {
+      // Frame 1 at t = 0.0s: person detected at center
+      const dets1: RawDetection[] = [
+        { bbox: [270, 50, 100, 180], class: "person", score: 0.9 },
+      ];
+      const res1 = updateTracker([], dets1, 0.0, W, H);
+      expect(res1.updatedTracks.length).toBe(1);
+      const trackId = res1.updatedTracks[0]!.id;
+      expect(res1.updatedTracks[0]!.consecutiveFrames).toBe(1);
+      expect(getTrackedDurationSec(res1.updatedTracks[0]!.history)).toBe(0.0);
+
+      // Frame 2 arrives after 0.5s gap (t = 0.50s) with significant walking displacement (centroid moves ~0.35 across frame)
+      const dets2: RawDetection[] = [
+        { bbox: [220, 60, 110, 190], class: "person", score: 0.88 },
+      ];
+      const res2 = updateTracker(res1.updatedTracks, dets2, 0.50, W, H);
+      expect(res2.updatedTracks.length).toBe(1);
+      // Confirmed: track ID preserved across 0.5s gap!
+      expect(res2.updatedTracks[0]!.id).toBe(trackId);
+      expect(res2.updatedTracks[0]!.consecutiveFrames).toBe(2);
+      expect(getTrackedDurationSec(res2.updatedTracks[0]!.history)).toBe(0.50);
+
+      // Frame 3 arrives after another 0.5s gap (t = 1.00s)
+      const dets3: RawDetection[] = [
+        { bbox: [180, 70, 120, 200], class: "person", score: 0.91 },
+      ];
+      const res3 = updateTracker(res2.updatedTracks, dets3, 1.00, W, H);
+      expect(res3.updatedTracks.length).toBe(1);
+      expect(res3.updatedTracks[0]!.id).toBe(trackId);
+      expect(res3.updatedTracks[0]!.consecutiveFrames).toBe(3);
+      expect(getTrackedDurationSec(res3.updatedTracks[0]!.history)).toBe(1.00);
+      // Track duration >= 0.8s satisfies minTrackDurationSec!
+      expect(res3.updatedTracks[0]!.history.length).toBe(3);
+    });
+
+    it("tolerates 0.8s gap between detections", () => {
+      // Frame 1 at t = 1.0s
+      const dets1: RawDetection[] = [
+        { bbox: [260, 40, 120, 160], class: "car", score: 0.95 },
+      ];
+      const res1 = updateTracker([], dets1, 1.0, W, H);
+      expect(res1.updatedTracks.length).toBe(1);
+      const trackId = res1.updatedTracks[0]!.id;
+
+      // Frame 2 at t = 1.8s (gap = 0.8s <= 1.0s)
+      const dets2: RawDetection[] = [
+        { bbox: [230, 45, 140, 180], class: "car", score: 0.95 },
+      ];
+      const res2 = updateTracker(res1.updatedTracks, dets2, 1.8, W, H);
+      expect(res2.updatedTracks.length).toBe(1);
+      expect(res2.updatedTracks[0]!.id).toBe(trackId);
+      expect(res2.updatedTracks[0]!.consecutiveFrames).toBe(2);
+      expect(getTrackedDurationSec(res2.updatedTracks[0]!.history)).toBeCloseTo(0.8, 2);
+    });
+
+    it("drops track when gap exceeds 1.0s", () => {
+      // Frame 1 at t = 0.0s
+      const dets1: RawDetection[] = [
+        { bbox: [270, 50, 100, 180], class: "person", score: 0.9 },
+      ];
+      const res1 = updateTracker([], dets1, 0.0, W, H);
+      const oldTrackId = res1.updatedTracks[0]!.id;
+
+      // Frame 2 at t = 1.5s (gap = 1.5s > 1.0s max gap)
+      const dets2: RawDetection[] = [
+        { bbox: [270, 50, 100, 180], class: "person", score: 0.9 },
+      ];
+      const res2 = updateTracker(res1.updatedTracks, dets2, 1.5, W, H);
+      expect(res2.updatedTracks.length).toBe(1);
+      // Confirmed: old track was dropped because gap > 1.0s; new track created!
+      expect(res2.updatedTracks[0]!.id).not.toBe(oldTrackId);
+      expect(res2.updatedTracks[0]!.consecutiveFrames).toBe(1);
+      expect(getTrackedDurationSec(res2.updatedTracks[0]!.history)).toBe(0.0);
+    });
+  });
 });

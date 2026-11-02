@@ -16,6 +16,7 @@ import { buildPhrase } from "../phrases";
 import { PriorityArbiter, makeHazardMessage } from "../arbiter";
 import {
   DEFAULT_SAMPLE_INTERVAL_SEC,
+  SampleSpacingStats,
   VideoClipSampler,
   VideoDiagnostics,
   calculateDecisionSummary,
@@ -50,6 +51,9 @@ export function Tier1ReviewPage({ onBack }: { onBack: () => void }): React.React
   // Stall recovery tracking (Req 1)
   const [recoveryCount, setRecoveryCount] = useState<number>(0);
   const [isRecovering, setIsRecovering] = useState<boolean>(false);
+
+  // Sample spacing tracking (Requirement 1)
+  const [sampleSpacingStats, setSampleSpacingStats] = useState<SampleSpacingStats | null>(null);
 
   const [metrics, setMetrics] = useState<Tier1Metrics>({
     fps: 0,
@@ -464,6 +468,7 @@ export function Tier1ReviewPage({ onBack }: { onBack: () => void }): React.React
           setIsRecovering(recovering);
           setDiagnostics((prev) => ({ ...prev, recoveryCount: count }));
         },
+        onSampleSpacingStats: (stats) => setSampleSpacingStats(stats),
         isDetectorIdle: () => !detector.isBusy(),
       },
       sampleIntervalSec
@@ -566,6 +571,7 @@ export function Tier1ReviewPage({ onBack }: { onBack: () => void }): React.React
             setIsRecovering(recovering);
             setDiagnostics((prev) => ({ ...prev, recoveryCount: count }));
           },
+          onSampleSpacingStats: (stats) => setSampleSpacingStats(stats),
           isDetectorIdle: () => !detector.isBusy(),
         },
         sampleIntervalSec
@@ -573,7 +579,7 @@ export function Tier1ReviewPage({ onBack }: { onBack: () => void }): React.React
 
       samplerRef.current = sampler;
       setSamplerMode(sampler.getMode());
-      await sampler.start(false);
+      await sampler.start(false, true);
 
       setEvalCompletedMessage(
         `Evaluation finished (${video.duration.toFixed(1)}s). Review decision rows below for ground truth labeling and CSV export.`
@@ -734,6 +740,26 @@ export function Tier1ReviewPage({ onBack }: { onBack: () => void }): React.React
         </div>
       )}
 
+      {/* High Sample Spacing Warning (Req 1) */}
+      {sampleSpacingStats?.warning && (
+        <div
+          style={{
+            background: "rgba(239, 68, 68, 0.15)",
+            border: "1px solid #ef4444",
+            borderRadius: "6px",
+            padding: "0.8rem 1rem",
+            marginBottom: "0.8rem",
+          }}
+        >
+          <h4 style={{ margin: "0 0 0.4rem 0", color: "#f87171", fontSize: "0.95rem" }}>
+            ⚠️ High Sample Spacing Warning (Median: {sampleSpacingStats.median.toFixed(2)}s &gt; 0.6s)
+          </h4>
+          <p style={{ margin: 0, fontSize: "0.8rem", color: "#d4d4d8" }}>
+            Median sample spacing between consecutive frames exceeded 0.6 s. On slower devices, please use offline &quot;Run Clip Evaluation&quot; so the video pauses while the detector runs, ensuring exact 0.4 s interval sampling.
+          </p>
+        </div>
+      )}
+
       {/* Evaluation completion banner */}
       {evalCompletedMessage && (
         <div
@@ -842,6 +868,14 @@ export function Tier1ReviewPage({ onBack }: { onBack: () => void }): React.React
           </div>
           <div>
             Sampler Mode: <strong style={{ color: "#a78bfa" }}>{samplerMode.toUpperCase()}</strong>
+          </div>
+          <div>
+            Sample Spacing:{" "}
+            <strong style={{ color: sampleSpacingStats?.warning ? "#ef4444" : "#4ade80" }}>
+              {sampleSpacingStats
+                ? `min ${sampleSpacingStats.min.toFixed(2)}s | med ${sampleSpacingStats.median.toFixed(2)}s | max ${sampleSpacingStats.max.toFixed(2)}s (${sampleSpacingStats.count} steps)`
+                : "--"}
+            </strong>
           </div>
         </div>
 

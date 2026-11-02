@@ -462,8 +462,20 @@ export function updateTracker(
 
   // Match existing tracks to detections of the same class
   for (const track of existingTracks) {
+    const gap = Math.max(0.01, timestampSec - track.lastSeenTimestamp);
+    // Maximum gap of 1.0 s before a track is dropped (Requirement 2)
+    if (gap > 1.0) {
+      continue;
+    }
+
     let bestMatchIdx = -1;
     let bestScore = -1;
+
+    // Scale centroid distance and IoU threshold according to the gap (nominal gap 0.25s)
+    const nominalInterval = 0.25;
+    const gapScale = Math.max(1.0, gap / nominalInterval);
+    const effectiveCentroidDistThreshold = Math.min(0.65, config.centroidDistanceThreshold * gapScale);
+    const effectiveIouThreshold = Math.max(0.05, config.iouMatchThreshold / gapScale);
 
     for (let i = 0; i < unmatchedDetections.length; i++) {
       const det = unmatchedDetections[i]!;
@@ -472,9 +484,9 @@ export function updateTracker(
       const iou = computeIoU(track.bbox, det.bbox);
       const centroidDist = computeCentroidDistance(track.bbox, det.bbox, frameWidth, frameHeight);
 
-      if (iou >= config.iouMatchThreshold || centroidDist <= config.centroidDistanceThreshold) {
-        // Combined match score (higher IoU and lower distance)
-        const score = iou + (1.0 - centroidDist);
+      if (iou >= effectiveIouThreshold || centroidDist <= effectiveCentroidDistThreshold) {
+        // Combined match score (higher IoU and lower distance scaled to gap)
+        const score = iou + Math.max(0, 1.0 - centroidDist / gapScale);
         if (score > bestScore) {
           bestScore = score;
           bestMatchIdx = i;
@@ -499,8 +511,8 @@ export function updateTracker(
 
       updatedTracks.push(track);
     } else {
-      // Retain track for up to 1 second if missed
-      if (timestampSec - track.lastSeenTimestamp < 1.0) {
+      // Retain track for up to 1.0 second before dropping
+      if (gap <= 1.0) {
         updatedTracks.push(track);
       }
     }

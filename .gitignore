@@ -5,6 +5,7 @@
 
 # Eval data and spend logs (private footage, no faces in git)
 eval/clips/
+eval/frames/
 eval/cache/
 eval/spend.jsonl
 eval/reports/

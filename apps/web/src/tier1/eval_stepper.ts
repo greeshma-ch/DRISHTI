@@ -149,14 +149,45 @@ export function extractDiagnostics(
   };
 }
 
+export interface SampleSpacingStats {
+  min: number;
+  median: number;
+  max: number;
+  count: number;
+  warning: boolean;
+}
+
+/** Compute min, median, max spacing across sampled frames and warn if median > 0.6s (Req 1). */
+export function computeSampleSpacingStats(spacings: number[]): SampleSpacingStats {
+  if (spacings.length === 0) {
+    return { min: 0, median: 0, max: 0, count: 0, warning: false };
+  }
+  const sorted = [...spacings].sort((a, b) => a - b);
+  const min = Math.round(sorted[0]! * 100) / 100;
+  const max = Math.round(sorted[sorted.length - 1]! * 100) / 100;
+  const mid = Math.floor(sorted.length / 2);
+  const median =
+    sorted.length % 2 !== 0
+      ? Math.round(sorted[mid]! * 100) / 100
+      : Math.round(((sorted[mid - 1]! + sorted[mid]!) / 2) * 100) / 100;
+  return {
+    min,
+    median,
+    max,
+    count: spacings.length,
+    warning: median > 0.6,
+  };
+}
+
 export interface SamplerCallbacks {
-  onStep: (sampleTime: number) => Promise<void>;
+  onStep: (sampleTime: number, actualTime?: number) => Promise<void>;
   onProgress?: (currentTime: number, duration: number) => void;
   onStall?: (stallMessage: string) => void;
   onError?: (errorMessage: string) => void;
   onComplete?: () => void;
   onPause?: () => void;
   onRecovery?: (recoveryCount: number, isRecovering: boolean) => void;
+  onSampleSpacingStats?: (stats: SampleSpacingStats) => void;
   isDetectorIdle?: () => boolean;
 }
 
@@ -290,7 +321,7 @@ export class VideoClipSampler {
     this.sampleIntervalSec = Math.max(0.05, intervalSec);
   }
 
-  public async start(startFromCurrent = false): Promise<void> {
+  public async start(startFromCurrent = false, offlineEval = false): Promise<void> {
     if (this.isRunning) return;
     this.isRunning = true;
     this.isPaused = false;
@@ -301,10 +332,176 @@ export class VideoClipSampler {
     this.lastProgressTimestamp = Date.now();
     this.lastSeenMediaTime = this.video.currentTime;
 
-    if (this.getMode() === "rvfc") {
+    if (offlineEval) {
+      await this.startOfflineEval(startFromCurrent);
+    } else if (this.getMode() === "rvfc") {
       await this.startRvfc(startFromCurrent);
     } else {
       await this.startSeek(startFromCurrent);
+    }
+  }
+
+  /**
+   * Offline deterministic evaluation (Requirement 1):
+   * Independent of device speed.
+   * Plays forward to next sample time on exact 0.4s grid, pauses, runs detector to completion,
+   * records result, then resumes.
+   * Measures actual sample spacing (min, median, max) and warns if median > 0.6s.
+   */
+  private async startOfflineEval(startFromCurrent: boolean): Promise<void> {
+    const video = this.video;
+    video.muted = true;
+    if (video.playbackRate !== undefined) {
+      video.playbackRate = 1.0;
+    }
+
+    const duration = video.duration || 0;
+    let targetTime = startFromCurrent
+      ? Math.round(video.currentTime / this.sampleIntervalSec) * this.sampleIntervalSec
+      : 0.0;
+    targetTime = Math.round(targetTime * 100) / 100;
+
+    let prevActualTime: number | null = null;
+    const actualSpacings: number[] = [];
+
+    // Ensure video is initially paused
+    try {
+      video.pause?.();
+    } catch {
+      // ignore
+    }
+    if (!startFromCurrent) {
+      video.currentTime = 0;
+    }
+
+    while (this.isRunning && !this.isCancelled && !this.isPaused) {
+      if (video.ended || (duration > 0 && targetTime > duration)) {
+        this.isRunning = false;
+        this.callbacks.onComplete?.();
+        break;
+      }
+
+      if (video.error) {
+        this.isRunning = false;
+        this.callbacks.onError?.(
+          `Video playback error: ${video.error.message || `Code ${video.error.code}`}`
+        );
+        break;
+      }
+
+      // Step 1: Advance video to targetTime by playing forward, then pause (Req 1)
+      const actualTime = await this.playToNextSample(targetTime);
+      if (this.isCancelled || this.isPaused) break;
+
+      // Track sample spacing
+      if (prevActualTime !== null) {
+        const delta = Math.round(Math.abs(actualTime - prevActualTime) * 100) / 100;
+        if (delta > 0) {
+          actualSpacings.push(delta);
+          const stats = computeSampleSpacingStats(actualSpacings);
+          this.callbacks.onSampleSpacingStats?.(stats);
+        }
+      }
+      prevActualTime = actualTime;
+
+      // Step 2: Run detector to completion on the paused frame (Req 1)
+      try {
+        await this.callbacks.onStep(targetTime, actualTime);
+        this.callbacks.onProgress?.(actualTime, duration);
+      } catch (err) {
+        this.isRunning = false;
+        this.callbacks.onError?.(`Step error at t=${targetTime.toFixed(2)}s: ${String(err)}`);
+        break;
+      }
+
+      // Step 3: Advance exact 0.4s grid
+      targetTime = Math.round((targetTime + this.sampleIntervalSec) * 100) / 100;
+    }
+
+    if (this.isPaused) {
+      this.callbacks.onPause?.();
+    }
+  }
+
+  /**
+   * Play forward to target sample time and pause immediately (Requirement 1).
+   * Keeps hardware decoders running naturally while halting during inference.
+   */
+  private playToNextSample(targetTime: number): Promise<number> {
+    const video = this.video;
+
+    // If already at or beyond targetTime
+    if (video.currentTime >= targetTime - 0.02) {
+      try {
+        video.pause?.();
+      } catch {
+        // ignore
+      }
+      return Promise.resolve(video.currentTime);
+    }
+
+    if (typeof video.requestVideoFrameCallback === "function") {
+      return new Promise((resolve) => {
+        let resolved = false;
+        let handle: number | null = null;
+        let safetyTimer: ReturnType<typeof setTimeout> | null = null;
+
+        const cleanup = () => {
+          if (safetyTimer) clearTimeout(safetyTimer);
+          if (handle !== null && video.cancelVideoFrameCallback) {
+            video.cancelVideoFrameCallback(handle);
+            handle = null;
+          }
+          try {
+            video.pause?.();
+          } catch {
+            // ignore
+          }
+        };
+
+        const finish = (time: number) => {
+          if (resolved) return;
+          resolved = true;
+          cleanup();
+          resolve(time);
+        };
+
+        const onFrame = (_now: number, metadata: { mediaTime: number }) => {
+          if (resolved) return;
+          const curTime = metadata?.mediaTime ?? video.currentTime;
+          const dur = video.duration || 0;
+          if (
+            curTime >= targetTime - 0.02 ||
+            video.ended ||
+            (dur > 0 && curTime >= dur - 0.05)
+          ) {
+            finish(curTime);
+            return;
+          }
+          handle = video.requestVideoFrameCallback!(onFrame);
+        };
+
+        handle = video.requestVideoFrameCallback!(onFrame);
+
+        safetyTimer = setTimeout(() => {
+          finish(video.currentTime);
+        }, 2000);
+
+        if (video.play) {
+          try {
+            const p = video.play();
+            if (p && typeof p.catch === "function") {
+              p.catch(() => finish(video.currentTime));
+            }
+          } catch {
+            finish(video.currentTime);
+          }
+        }
+      });
+    } else {
+      // Seek fallback
+      video.currentTime = targetTime;
+      return waitForSeek(video, targetTime).then((res) => res.actualTime);
     }
   }
 

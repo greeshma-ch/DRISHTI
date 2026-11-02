@@ -1,0 +1,5 @@
+id,clip,sample_time,t,class,direction,decision,reason,label
+"6.40_1_other_suppressed__static_debounce","clip_006.mp4",6.40,6.40,"other","center","suppressed: static_debounce","static other tracked 0.00s < 0.4s","Correct silence"
+"clip_006.mp4_missed_14.80","clip_006.mp4",14.80,14.80,"wall","center","missed_hazard","wall turn missed by Tier 1","Should have alerted"
+"clip_006.mp4_missed_21.20","clip_006.mp4",21.20,21.20,"stairs","center","missed_hazard","descending stairs missed by Tier 1","Should have alerted"
+"clip_006.mp4_missed_32.40","clip_006.mp4",32.40,32.40,"wall","center","missed_hazard","corridor wall turn missed by Tier 1","Should have alerted"

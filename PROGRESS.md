@@ -77,37 +77,58 @@ Throttle levels are defined in AGENTS.md (warn $60, throttle $90, block dev call
 | Nov 01 | Tier 2 Truncation Reduction & Monitoring (Task B) | First attempt max_tokens=800, retry=1200; shortened prompt with one-line JSON example; retries/total frames and median reasoning tokens in /status and Debug Overlay; >10% retry warning |
 | Nov 01 | Tier 1 Android Chrome Hardware Sampling & Telemetry | requestVideoFrameCallback (rVFC) sampling at playbackRate 1, muted, 0.4s default; seek fallback; loadeddata gate; video diagnostics HUD (readyState, networkState, errors, dimensions, 10 events); whole-clip evaluation with alert True/False/Missed marking & CSV export |
 | Nov 01 | Tier 1 Stall Recovery & Decision Labeling | Automatic stall recovery (waiting/stalled/pause -> wait canplay -> play; abort 3 failed recoveries or 8s no progress); 320px capture downscaling; >854px warning with ffmpeg downscale command; decision row labeling buttons (True/False alert, Correct silence/Should have alerted), bulk "Mark all unlabeled as correct", "+ Mark Missed" hazard logging; live summary metrics (TP, FP, TN, FN, alerts/min, precision, recall) and CSV export |
+| Nov 02 | Offline Eval Independence & Tier 2 Recall on Labeled Misses | Deterministic 0.4s sample stepper (playToNextSample, pause, detect, record, resume); gap-tolerant tracking up to 1.0s; sample spacing stats (min/med/max with >0.6s warning); check_clip_hazards.py --csv for labeled misses (±1.5s window); measured rerun of clip_001 and clip_006 |
 
 ## Current session
 
-- Working on: Tier 1 Android Phone Stall Recovery & Decision Labeling (COMPLETED)
+- Working on: Offline Eval Device-Speed Independence, Gap Tolerance & Tier 2 Labeled Misses Evaluation (COMPLETED)
 - Done this session:
-  - **Stall Recovery & Hardware Downscale (Item 1)**:
-    - Implemented automatic stall recovery in `VideoClipSampler`: on `waiting`, `stalled`, or unexpected `pause` (browser/codec starvation), pauses sampler, waits for `canplay` (timeout 2s), calls `play()`, increments `recoveryCount`, and continues playback seamlessly.
-    - Telemetry HUD displays live count: `"recovered N times"` and active recovery indicator.
-    - Abort safety: aborts only after 3 consecutive failed recovery attempts or 8 s without progress (`Date.now() - lastProgressTimestamp >= 8000`).
-    - Fixed memory exhaustion on mobile Chrome by capturing frames with `createImageBitmap(source, { resizeWidth: targetWidth, resizeHeight: targetHeight, resizeQuality: "low" })` (where `targetWidth <= 320`), avoiding full-resolution (e.g. 1080p) bitmap copies in memory.
-    - Added high-resolution warning banner in `Tier1ReviewPage` for clips wider than 854 px with one-click copyable ffmpeg downscale command: `ffmpeg -i input.mp4 -vf "scale=854:-2" -c:v libx264 -pix_fmt yuv420p -c:a copy output_480p.mp4`.
-  - **Decision Labeling & Ground Truth Metrics (Item 2)**:
-    - Every row in the Tracked Object Decisions Log now has ground truth labeling buttons:
-      - `"alerted"` rows: `"True alert"` and `"False alert"`
-      - `suppressed` rows: `"Correct silence"` and `"Should have alerted"`
-      - Current label displayed on each row as a distinct colored badge (`True alert` green, `False alert` red, `Correct silence` blue, `Should have alerted` amber, `Unlabeled` muted).
-    - Bulk action: `"✓ Mark all unlabeled as correct"` button automatically labels all unlabeled alerted rows as `"True alert"`, suppressed rows as `"Correct silence"`, and missed rows as `"Should have alerted"`.
-    - `"+ Mark Missed"` button and modal records current playback time with hazard type and direction picker, producing a row with `label = "Should have alerted"`.
-    - Added live Ground Truth Summary Metrics panel displaying:
-      - True Alerts ($TP$), False Alerts ($FP$), Correct Silences ($TN$), Missed Hazards ($FN$)
-      - Alerts / Min ($totalAlerts / (clipDurationSec / 60)$)
-      - Precision ($TP / (TP + FP)$) and Recall ($TP / (TP + FN)$) with zero-denominator safety (`"N/A"`)
-      - Unlabeled count
-    - `formatDecisionsToCsv` includes the `label` column containing all assigned ground truth labels.
+  - **Offline Evaluation Device-Speed Independence (Item 1)**:
+    - Updated `eval_stepper.ts` and `Tier1ReviewPage.tsx` with deterministic step-and-pause offline evaluation: plays forward to next sample time via `playToNextSample(targetTime)`, pauses immediately, runs detector to completion, records result, and resumes.
+    - Samples evaluated on an exact 0.4 s grid (`targetTime = 0.0, 0.4, 0.8, ...`) in `mediaTime`, completely decoupling offline eval from mobile/desktop processor speed.
+    - Added sample spacing telemetry (`computeSampleSpacingStats`): calculates `min`, `median`, and `max` sample spacing in seconds across all steps.
+    - Displayed spacing stats prominently on the review page HUD with an alert warning banner if `median > 0.6s`.
+  - **Live Mode Gap Tolerance (Item 2)**:
+    - Updated `updateTracker` in `apps/web/src/tier1/math.ts`:
+      - Centroid distance and IoU matching thresholds now scale proportionally with sample gap: `gapScale = Math.max(1.0, gap / nominalInterval)` (`nominalInterval = 0.25s`).
+      - Centroid distance threshold scales up to 0.65; IoU threshold scales down to 0.05.
+      - Tracks persist across ~0.5s gaps (tested at 0.5s and 0.8s), preserving track ID, incrementing `consecutiveFrames`, and accumulating `trackedDuration`.
+      - Maximum gap before track drop enforced at 1.0 s (`gap > 1.0s`).
+  - **Tier 2 Perception Verification on Labeled Misses (Item 3)**:
+    - Extended `scripts/check_clip_hazards.py` with `--csv <path>` argument to read exported labeled decision logs.
+    - Filters rows marked as `missed_hazard` or `Should have alerted`, extracts frames at $t-1$, $t$, and $t+1$ s downscaled to 640 px wide with OpenCV, and calls `/frame` on each.
+    - Evaluates semantic match within $\pm 1.5$ s window and formats table: `clip, t, expected, Tier 2 type & dir, dist, urg, latency, retries, hit/miss`.
+    - Outputs Tier 2 recall summary table broken down by hazard type (`stairs`, `wall`, `person`, `vehicle`).
+  - **Deterministic Clip Evaluation Rerun (Item 4)**:
+    - Implemented `scripts/extract_frames.py` and `apps/web/src/tier1/run_clip_eval.ts` executing the exact same offline COCO-SSD `lite_mobilenet_v2` model, gap-tolerant tracker, and arbiter at exact 0.40s sample intervals.
+    - Rerun `clip_001.mp4` (21.03s, 53 frames):
+      - Sample spacing: min=0.40s, median=0.40s, max=0.40s (0.40s grid verified).
+      - Total decisions logged: 16 (state changes only; no frame spam).
+      - Total alerts: 0 (0.0 alerts/min).
+      - True Alerts (TP): 0, False Alerts (FP): 0, Correct Silences (TN): 16, Missed Hazards (FN): 0.
+      - Tracks cleanly accumulate duration across frames and transition to closing-speed checks (`closing_not_sustained`) instead of resetting at "tracked 0.00s".
+      - Exported `eval/clip_001_decisions.csv` (16 rows).
+    - Rerun `clip_006.mp4` (38.45s, 97 frames):
+      - Sample spacing: min=0.40s, median=0.40s, max=0.40s (0.40s grid verified).
+      - Total decisions logged: 4.
+      - Total alerts: 0 (0.0 alerts/min).
+      - True Alerts (TP): 0, False Alerts (FP): 0, Correct Silences (TN): 1, Missed Hazards (FN): 3.
+      - Precision: N/A, Recall: 0.0% (static hazards outside COCO vocabulary).
+      - Exported `eval/clip_006_decisions.csv` (4 rows).
+    - Ran `python scripts/check_clip_hazards.py --csv eval/clip_006_decisions.csv` on the 3 labeled misses with Tier 2:
+      - $t=14.80$s wall (center): Tier 2 detected `bag` ($t=13.8$s), `stairs` ($t=15.8$s) -> MISS
+      - $t=21.20$s stairs (center): Tier 2 detected `stairs` ($t=20.2$s, $t=21.2$s), dist=near, urg=2, latency=1931ms, retries=0/4 -> **HIT**
+      - $t=32.40$s wall (center): Tier 2 detected `none` (dark corridor) -> MISS
+      - Tier 2 Recall on stairs: **100.0% (1/1 hit)**
+      - Tier 2 Recall on wall: **0.0% (0/2 hit)**
+      - Overall Tier 2 Recall on misses: **33.3% (1/3 hit)**
   - **Testing & Verification**:
-    - `eval_stepper.test.ts`: 21 tests covering stall recovery on waiting/stalled/pause, recovery counting, 8s no-progress abort, 3 failed recoveries abort, >854px warning check, label state transitions, bulk labeling, summary math, edge cases, and CSV export.
-    - `vitest run`: 121 tests passed across all 8 test files in `apps/web`.
+    - `vitest run`: 126/126 passed across 8 test suites.
     - `tsc --noEmit`: 0 errors.
     - `eslint`: 0 errors.
-    - `vite build`: built cleanly in 9.04s.
-    - `pytest server/tests`: 28 passed in 0.84s.
+    - `pytest server/tests`: 28 passed.
+    - `ruff`: all checks passed.
+    - `mypy`: 0 errors.
 - Next: P4 Tier 2 hardening, rate limiter, spend guard.
 - Blockers: None
 
