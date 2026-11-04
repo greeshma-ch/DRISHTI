@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import sqlite3
 import tempfile
 import time
@@ -10,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from server.rate_limiter import RateLimiter, ENDPOINT_CONFIG
+from server.rate_limiter import RateLimiter
 
 
 @pytest.fixture

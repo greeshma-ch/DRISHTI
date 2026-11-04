@@ -14,7 +14,7 @@ from .auth import router as auth_router
 from .config import settings
 from .emergency import router as emergency_router
 from .meta_client import analyze_frame, get_perception_stats, get_total_spend, load_prices
-from .rate_limiter import init_rate_limiter, get_rate_limiter, RateLimiter
+from .rate_limiter import RateLimiter, get_rate_limiter, init_rate_limiter
 from .telegram_link import router as telegram_router
 
 # Configure logging

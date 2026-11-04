@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-import pytest
-from unittest.mock import patch
 import time
+from unittest.mock import patch
+
+import pytest
 
 from server.circuit_breaker import (
+    DEGRADED_RESULT,
     call_with_circuit_breaker,
     get_circuit_state,
     reset_circuit_breaker,
-    DEGRADED_RESULT,
 )
 
 

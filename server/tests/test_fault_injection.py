@@ -27,23 +27,13 @@ import pytest
 from httpx import ASGITransport, AsyncClient, Response
 
 from server.app import app
+from server.circuit_breaker import get_circuit_state, reset_circuit_breaker
 from server.meta_client import (
-    DEGRADED_CIRCUIT_OPEN,
-    DEGRADED_RATE_LIMITED,
-    DEGRADED_SPEND_BLOCKED,
-    PerceptionResult,
     analyze_frame,
-    get_total_spend,
-    parse_perception_response,
-    record_spend,
     reset_parse_failures,
     reset_perception_stats,
-    _load_spend_total,
-    _total_spend_usd,
-    _spend_loaded,
 )
-from server.circuit_breaker import reset_circuit_breaker, get_circuit_state
-from server.rate_limiter import init_rate_limiter, get_rate_limiter
+from server.rate_limiter import init_rate_limiter
 
 
 @pytest.fixture(autouse=True)

@@ -118,8 +118,9 @@ def test_phrase_length_max_4_words() -> None:
 
 def test_hedged_wording_via_parse_perception() -> None:
     """Integration test: hedged wording through parse_perception_response."""
-    from server.meta_client import parse_perception_response
     import json
+
+    from server.meta_client import parse_perception_response
 
     # Low confidence hazard - truncated to 4 words
     raw = json.dumps({

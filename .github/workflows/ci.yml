@@ -9,29 +9,28 @@ on:
 jobs:
   server:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: server
+    env:
+      PYTHONPATH: .
+      EMERGENCY_DRY_RUN: "true"
+      EMERGENCY_HMAC_SECRET: "ci-test-secret"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-      - run: pip install ".[dev]"
-      - run: ruff check .
-      - run: python -m pytest -q
+          python-version: "3.12"
+      - run: pip install -r server/requirements.txt
+      - run: ruff check server
+      - run: python -m pytest server/tests -q
 
   web:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: apps/web
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-      - run: npm ci
-      - run: npm run lint
-      - run: npm run typecheck
-      - run: npx vitest run
+      - run: npm ci --prefix apps/web
+      - run: npm --prefix apps/web run lint
+      - run: npm --prefix apps/web run typecheck
+      - run: npm --prefix apps/web test -- --run
+      - run: npm --prefix apps/web run build

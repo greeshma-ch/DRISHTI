@@ -121,7 +121,7 @@ async def call_with_circuit_breaker(coro, timeout: float | None = None) -> Any:
             elif _circuit_state == "closed":
                 _failure_count = 0
         return result
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.warning("Circuit breaker: call timed out after %.1fs", timeout)
         async with _get_lock():
             _failure_count += 1

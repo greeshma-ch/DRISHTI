@@ -13,9 +13,9 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, Field, field_validator
 
+from .circuit_breaker import call_with_circuit_breaker
 from .config import settings
 from .phrases import build_phrase
-from .circuit_breaker import call_with_circuit_breaker, DEGRADED_RESULT as CB_DEGRADED_RESULT
 
 logger = logging.getLogger(__name__)
 

@@ -12,11 +12,8 @@ from httpx import ASGITransport, AsyncClient
 
 from server.app import app
 from server.meta_client import (
-    get_total_spend,
-    record_spend,
     _load_spend_total,
-    _total_spend_usd,
-    _spend_loaded,
+    record_spend,
 )
 
 
@@ -176,7 +173,8 @@ def test_frame_includes_suggested_interval_at_90() -> None:
 
     import asyncio
     from unittest.mock import AsyncMock
-    from httpx import Response, Request
+
+    from httpx import Request, Response
 
     mock_http = AsyncMock()
     req = Request("POST", "http://test")
@@ -221,7 +219,8 @@ def test_final_run_bypasses_spend_block() -> None:
     }
 
     from unittest.mock import AsyncMock, patch
-    from httpx import Response, Request
+
+    from httpx import Request, Response
 
     mock_http = AsyncMock()
     req = Request("POST", "http://test")
