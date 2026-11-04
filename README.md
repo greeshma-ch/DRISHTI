@@ -177,9 +177,9 @@ max all 0.40 s).
 
 ## Tests
 
-**228 tests across 21 test files**, all passing.
+**311 tests across 26 test files**, all passing.
 
-### Web app (Vitest) — 154 tests in 14 files
+### Web app (Vitest) — 204 tests in 18 files
 
 | Test file | Tests | What it covers |
 |---|:---:|---|
@@ -198,7 +198,7 @@ max all 0.40 s).
 | `App.test.tsx` | 5 | App controls, debug overlay, stale threshold |
 | `smoke.test.ts` | 1 | Environment smoke test |
 
-### Server (pytest) — 74 tests in 7 files
+### Server (pytest) — 107 tests in 8 files
 
 | Test file | Tests | What it covers |
 |---|:---:|---|
