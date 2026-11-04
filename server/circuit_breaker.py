@@ -22,7 +22,15 @@ logger = logging.getLogger(__name__)
 _circuit_state: str = "closed"  # "closed" | "open" | "half-open"
 _failure_count: int = 0
 _last_failure_time: float = 0.0
-_lock = asyncio.Lock()
+_lock: asyncio.Lock | None = None
+
+
+def _get_lock() -> asyncio.Lock:
+    global _lock
+    if _lock is None:
+        _lock = asyncio.Lock()
+    return _lock
+
 
 # Config from settings
 _OPEN_THRESHOLD = settings.CIRCUIT_BREAKER_THRESHOLD  # 3
@@ -60,7 +68,7 @@ def _is_retryable_error(exc: Exception) -> bool:
 async def _check_and_update_state() -> str:
     """Check circuit state and transition if needed. Returns current state."""
     global _circuit_state, _failure_count, _last_failure_time
-    async with _lock:
+    async with _get_lock():
         now = time.time()
         if _circuit_state == "open":
             if now - _last_failure_time >= _OPEN_DURATION:
@@ -105,7 +113,7 @@ async def call_with_circuit_breaker(coro, timeout: float | None = None) -> Any:
         # Run with timeout
         result = await asyncio.wait_for(coro, timeout=timeout)
         # Success - reset failure count and close circuit if half-open
-        async with _lock:
+        async with _get_lock():
             if _circuit_state == "half-open":
                 _circuit_state = "closed"
                 _failure_count = 0
@@ -115,7 +123,7 @@ async def call_with_circuit_breaker(coro, timeout: float | None = None) -> Any:
         return result
     except asyncio.TimeoutError:
         logger.warning("Circuit breaker: call timed out after %.1fs", timeout)
-        async with _lock:
+        async with _get_lock():
             _failure_count += 1
             _last_failure_time = time.time()
             logger.warning("Circuit breaker: failure %d/%d", _failure_count, _OPEN_THRESHOLD)
@@ -129,7 +137,7 @@ async def call_with_circuit_breaker(coro, timeout: float | None = None) -> Any:
         # Only count retryable errors as failures
         if _is_retryable_error(exc):
             logger.warning("Circuit breaker: call failed (%s): %s", type(exc).__name__, exc)
-            async with _lock:
+            async with _get_lock():
                 _failure_count += 1
                 _last_failure_time = time.time()
                 logger.warning("Circuit breaker: failure %d/%d", _failure_count, _OPEN_THRESHOLD)
@@ -154,7 +162,8 @@ def get_circuit_state() -> dict[str, Any]:
 
 def reset_circuit_breaker() -> None:
     """Reset circuit breaker to closed state (for testing)."""
-    global _circuit_state, _failure_count, _last_failure_time
+    global _circuit_state, _failure_count, _last_failure_time, _lock
     _circuit_state = "closed"
     _failure_count = 0
     _last_failure_time = 0.0
+    _lock = None

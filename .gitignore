@@ -11,7 +11,7 @@ eval/spend.jsonl
 eval/reports/
 
 # Local databases
-*.sqlite
+*.sqlite*
 *.sqlite3
 *.db
 
