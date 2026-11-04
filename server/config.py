@@ -26,7 +26,7 @@ class Settings(BaseSettings):
 
     # Emergency (P6)
     EMERGENCY_HMAC_SECRET: str = ""
-    EMERGENCY_DRY_RUN: bool = False
+    EMERGENCY_DRY_RUN: bool = True
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
