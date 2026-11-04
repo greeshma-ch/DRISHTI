@@ -1,5 +1,4 @@
 import { describe, it, expect } from "vitest";
-import { act } from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import { buildPhrase } from "./phrases";

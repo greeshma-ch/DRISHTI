@@ -80,7 +80,8 @@ Throttle levels are defined in AGENTS.md (warn $60, throttle $90, block dev call
 
 ## Current session
 
-- Working on: Tier 1 Android Phone Stall Recovery & Decision Labeling (COMPLETED)
+- Build target maintenance: Added `test-web`, `typecheck-web`, `lint-web`, `build-web`, `test-server`, `lint-server`, and aggregate `check` targets in the root Makefile; web recipes use `npm --prefix` rather than changing directories. Verification is blocked because `make` is not installed in either available shell.
+- Working on: P6 Phase (a) emergency flow (implementation complete; awaiting Android phone test with `EMERGENCY_DRY_RUN=false)
 - Done this session:
   - **Stall Recovery & Hardware Downscale (Item 1)**:
     - Implemented automatic stall recovery in `VideoClipSampler`: on `waiting`, `stalled`, or unexpected `pause` (browser/codec starvation), pauses sampler, waits for `canplay` (timeout 2s), calls `play()`, increments `recoveryCount`, and continues playback seamlessly.
@@ -103,12 +104,25 @@ Throttle levels are defined in AGENTS.md (warn $60, throttle $90, block dev call
     - `formatDecisionsToCsv` includes the `label` column containing all assigned ground truth labels.
   - **Testing & Verification**:
     - `eval_stepper.test.ts`: 21 tests covering stall recovery on waiting/stalled/pause, recovery counting, 8s no-progress abort, 3 failed recoveries abort, >854px warning check, label state transitions, bulk labeling, summary math, edge cases, and CSV export.
-    - `vitest run`: 121 tests passed across all 8 test files in `apps/web`.
+    - `vitest run`: 168 tests passed across all test files in `apps/web` (including 11 emergency state machine, 9 button, 12 demo page, 6 layout, 40+ arbiter, 30 tier1 math, 21 eval_stepper).
     - `tsc --noEmit`: 0 errors.
-    - `eslint`: 0 errors.
-    - `vite build`: built cleanly in 9.04s.
-    - `pytest server/tests`: 28 passed in 0.84s.
-- Next: P4 Tier 2 hardening, rate limiter, spend guard.
+    - `eslint`: 0 errors (46 warnings, pre-existing).
+    - `vite build`: built cleanly.
+    - `pytest server/tests/test_p6_emergency.py`: 33 passed in 0.89s.
+- **P6 Phase (a) Emergency Core — Implementation Complete & Verified:**
+  - **Server**: `auth.py` (stateless HMAC token + 20/hr IP rate limit), `emergency.py` (POST /emergency with 10/hr per-user cap, Telegram send, dry-run mode), `telegram_link.py` (GET /telegram/connect with HMAC start codes, POST /telegram/poll with getUpdates filtering, POST /telegram/manual fallback), `config.py` (EMERGENCY_HMAC_SECRET, EMERGENCY_DRY_RUN), `app.py` (router registration), `tests/test_p6_emergency.py` (33 tests covering token issue/verify, bounds, rate limits, dry-run, message format, Telegram connect/poll/manual, bot token security, startup config).
+  - **Client**: `EmergencyStateMachine.ts` (useEmergency hook: idle→countdown[10s+beep+3-2-1]→cancelled|sending→success|failure, no network during countdown), `EmergencyButton.tsx` (accessible red button, full-width mobile, triple-tap detector, contact count), `EmergencyScreen.tsx` (full-screen overlay, soft beep via Web Audio, success→tel:112 full-screen tap, failure→sms: first contact→112), `useVoiceHelp.ts` (SpeechRecognition for "help"/"मदद", cancel on "cancel"/"रुको"), `EmergencyDemoPage.tsx` (/#emergency-demo with 5 demo buttons, no real network), `arbiter.ts` (P0 emergency message factories), `phrases.json` (EN/HI emergency phrases).
+  - **Context Fix**: Single `EmergencyProvider` with `useEmergencyContext()` hook provides exactly one state machine instance. `useEmergencyContextOptional()` for test components. GPS watchPosition caching for SMS prefill. Instance ID for debug logging.
+  - **P6 Bug Fixes Applied**:
+    - Bug 1 (duplicate instances): Single EmergencyProvider context.
+    - Bug 2 (triple-tap during countdown): `countdownStartRef` ignores taps <1500ms into countdown.
+    - Bug 3 (contacts display): Shows "N contacts loaded" with parse error debug.
+    - Bug 4 (Done button): Debug logging with instanceId/state; `reset()` + `clearEventLog()`; visibilitychange handler speaks "Back in Drishti".
+    - Bug 5 (voice-first failure): Single speak, whole screen SMS target via touch handler, 1s long press for 112, SMS prefill with cached GPS.
+    - Bug 6 (GPS caching): `watchPosition` in provider caches `lastGpsPosition` for SMS prefill.
+  - **TypeScript/Lint**: All 0 errors. `tsc --noEmit`, `eslint`, `ruff check` clean.
+  - **Ready for phone test**: Stop here for Android Chrome test with `EMERGENCY_DRY_RUN=false`. Verify big button, triple-tap, voice "help", countdown speaks/beeps/3-2-1, cancel, success→Telegram received with correct format, tel:112 tap prompts call, failure→sms: fallback.
+- Next: P6 Phase (b) Profile & contacts in IndexedDB + settings UI.
 - Blockers: None
 
 ## Open issues and risks

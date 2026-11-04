@@ -1,5 +1,5 @@
 import { defineConfig } from "vite";
-import react from "@vitejs/plugin-react";
+import react from "@vitejs/plugin-react-swc";
 import path from "path";
 
 export default defineConfig({
@@ -7,8 +7,11 @@ export default defineConfig({
   resolve: {
     alias: {
       "@shared": path.resolve(__dirname, "../../shared"),
+      "@shared/*": path.resolve(__dirname, "../../shared"),
     },
+    conditions: ["import", "module", "default"],
   },
+  envDir: path.resolve(__dirname),
   server: {
     port: 5173,
     allowedHosts: true,
@@ -18,10 +21,41 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api/, ""),
       },
+      "/emergency": {
+        target: "http://localhost:8000",
+        changeOrigin: true,
+      },
+      "/auth": {
+        target: "http://localhost:8000",
+        changeOrigin: true,
+      },
+      "/telegram": {
+        target: "http://localhost:8000",
+        changeOrigin: true,
+      },
+      "/health": {
+        target: "http://localhost:8000",
+        changeOrigin: true,
+      },
+      "/status": {
+        target: "http://localhost:8000",
+        changeOrigin: true,
+      },
+      "/spend": {
+        target: "http://localhost:8000",
+        changeOrigin: true,
+      },
     },
   },
   test: {
     globals: true,
     environment: "jsdom",
+    resolve: {
+      alias: {
+        "@shared": path.resolve(__dirname, "../../shared"),
+        "@shared/*": path.resolve(__dirname, "../../shared"),
+      },
+      conditions: ["import", "module", "default"],
+    },
   },
 });

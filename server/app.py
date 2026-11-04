@@ -2,14 +2,24 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
+from .auth import router as auth_router
 from .config import settings
+from .emergency import router as emergency_router
 from .meta_client import analyze_frame, get_perception_stats, get_total_spend
+from .telegram_link import router as telegram_router
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 
 app = FastAPI(title="Drishti", version="0.0.1")
 
@@ -20,13 +30,27 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Register routers
+app.include_router(auth_router)
+app.include_router(emergency_router)
+app.include_router(telegram_router)
+
 
 SPEND_LOG = Path("eval/spend.jsonl")
 
 
 @app.get("/health")
-async def health() -> dict[str, str]:
-    return {"status": "ok"}
+async def health() -> dict[str, object]:
+    from .config import settings
+
+    telegram_configured = bool(
+        settings.TELEGRAM_BOT_TOKEN and settings.TELEGRAM_BOT_TOKEN != "changeme"
+    )
+    return {
+        "status": "ok",
+        "dry_run": settings.EMERGENCY_DRY_RUN,
+        "telegram_configured": telegram_configured,
+    }
 
 
 @app.get("/spend")
