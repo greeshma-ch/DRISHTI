@@ -1,4 +1,4 @@
-.PHONY: dev dev-server dev-web test test-server test-web lint lint-server lint-web tunnel
+.PHONY: dev dev-server dev-web test test-server test-web typecheck-web lint lint-server lint-web build-web check tunnel
 
 # ── Dev ──────────────────────────────────────────────────
 dev: dev-server dev-web
@@ -7,7 +7,8 @@ dev-server:
 	PYTHONPATH=. uvicorn server.app:app --reload --host 0.0.0.0 --port 8000
 
 dev-web:
-	cd apps/web && npm install && npm run dev
+	npm --prefix apps/web install
+	npm --prefix apps/web run dev
 
 # ── Test ─────────────────────────────────────────────────
 test: test-server test-web
@@ -16,16 +17,24 @@ test-server:
 	PYTHONPATH=. python -m pytest server/tests -q
 
 test-web:
-	cd apps/web && npx vitest run
+	npm --prefix apps/web test -- --run
 
-# ── Lint ─────────────────────────────────────────────────
+# ── Typecheck, lint, and build ───────────────────────────
+typecheck-web:
+	npm --prefix apps/web run typecheck
+
 lint: lint-server lint-web
 
 lint-server:
 	ruff check server
 
 lint-web:
-	cd apps/web && npm run lint && npm run typecheck
+	npm --prefix apps/web run lint
+
+build-web:
+	npm --prefix apps/web run build
+
+check: test-web typecheck-web lint-web build-web test-server lint-server
 
 # ── Tunnel ───────────────────────────────────────────────
 tunnel:

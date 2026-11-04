@@ -17,7 +17,19 @@ client = TestClient(app)
 def test_health() -> None:
     r = client.get("/health")
     assert r.status_code == 200
-    assert r.json() == {"status": "ok"}
+    data = r.json()
+    expected = {
+        "status": "ok",
+        "dry_run": data["dry_run"],
+        "telegram_configured": data["telegram_configured"],
+    }
+    assert data == expected
+    assert set(data.keys()) == {"status", "dry_run", "telegram_configured"}
+    assert isinstance(data["dry_run"], bool)
+    assert isinstance(data["telegram_configured"], bool)
+    # No secrets or tokens in response
+    for v in data.values():
+        assert v not in ("changeme", ""), "secret value leaked"
 
 
 def test_spend_empty() -> None:

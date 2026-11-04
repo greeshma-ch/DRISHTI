@@ -24,7 +24,21 @@ class Settings(BaseSettings):
     RATE_LIMIT_GEOCODE_BURST: int = 1
     TIER2_CONFIDENCE_THRESHOLD: float = 0.6
 
+    # Emergency (P6)
+    EMERGENCY_HMAC_SECRET: str = ""
+    EMERGENCY_DRY_RUN: bool = False
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # Startup validation for emergency HMAC secret
+        if not self.EMERGENCY_DRY_RUN:
+            if not self.EMERGENCY_HMAC_SECRET or self.EMERGENCY_HMAC_SECRET == "changeme":
+                raise RuntimeError(
+                    "EMERGENCY_HMAC_SECRET must be set in .env (not default/empty) "
+                    "when EMERGENCY_DRY_RUN=false"
+                )
 
 
 settings = Settings()

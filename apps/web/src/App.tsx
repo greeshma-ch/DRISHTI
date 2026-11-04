@@ -18,6 +18,7 @@ import { Tier1Detector } from "./tier1/detector";
 import { Tier1Metrics } from "./tier1/types";
 import { Tier1ReviewPage } from "./tier1/Tier1ReviewPage";
 import { playClipOrTTS, stopClip, playSoftTick } from "./audio";
+import { EmergencyProvider, useEmergencyContext, EmergencyButton, EmergencyScreen, EmergencyDemoPage, DebugStrip } from "./emergency";
 
 interface HazardItem {
   type: string;
@@ -102,19 +103,13 @@ const waitForVoices = (timeoutMs = 5000): Promise<SpeechSynthesisVoice[]> => {
   });
 };
 
-function MainApp() {
+function MainApp({ lang, setLang }: { lang: "en" | "hi"; setLang: React.Dispatch<React.SetStateAction<"en" | "hi">> }) {
+  const { state, countdown, contactName, httpStatus, lastRequestUrl, lastError, eventLog, cancel, setRecentAlerts, clearEventLog } = useEmergencyContext();
   const [isRunning, setIsRunning] = useState(false);
   const isRunningRef = useRef(false);
   useEffect(() => {
     isRunningRef.current = isRunning;
   }, [isRunning]);
-  const [lang, setLang] = useState<"en" | "hi">(() => {
-    if (typeof window !== "undefined") {
-      const saved = localStorage.getItem("drishti-lang");
-      if (saved === "en" || saved === "hi") return saved;
-    }
-    return "en";
-  });
   const [statusMsg, setStatusMsg] = useState("Ready");
   const [lastLatency, setLastLatency] = useState<number | null>(null);
   const [finishReason, setFinishReason] = useState<string>("--");
@@ -185,10 +180,24 @@ function MainApp() {
   // Utterance generation counter — prevents stale onend/onerror from clearing state
   const utteranceGenRef = useRef<number>(0);
 
-  // Sync language to localStorage for shared state across pages
+  // Emergency contacts are configured at build time until profile storage lands.
+  const [emergencyContacts] = useState(() => {
+    try {
+      const parsed = JSON.parse(import.meta.env.VITE_EMERGENCY_CONTACTS_JSON || "[]");
+      return Array.isArray(parsed) ? parsed.filter((c) => c && typeof c.id === "string" && typeof c.name === "string" && typeof c.telegramChatId === "string" && /^-?\\d+$/.test(c.telegramChatId)) : [];
+    } catch {
+      return [];
+    }
+  });
+  const userName = "User";
+
+  // Recent alerts ring buffer (max 3)
+  const [recentAlerts, setRecentAlertsLocal] = useState<string[]>([]);
+
+  // Sync recent alerts to emergency context
   useEffect(() => {
-    localStorage.setItem("drishti-lang", lang);
-  }, [lang]);
+    setRecentAlerts(recentAlerts);
+  }, [recentAlerts, setRecentAlerts]);
 
   const getUtterancesQueued = useCallback(() => {
     if (typeof window === "undefined" || !("speechSynthesis" in window)) return 0;
@@ -559,6 +568,12 @@ function MainApp() {
             // Store durations for arbiter callback
             currentDurationsRef.current = currentDurations;
 
+            // Add to recent alerts ring buffer (max 3) for emergency context
+            setRecentAlertsLocal((prev) => {
+              const next = [...prev, phrase];
+              return next.slice(-3);
+            });
+
             // Enqueue through priority arbiter
             const urgency = urgentHazard.urgency ?? 0;
             const confidence = urgentHazard.confidence ?? 0;
@@ -843,6 +858,7 @@ function MainApp() {
         boxSizing: "border-box",
       }}
     >
+      <DebugStrip />
       <header style={{ width: "100%", maxWidth: "640px", marginBottom: "0.8rem", textAlign: "center" }}>
         <h1 style={{ margin: "0.2rem 0", fontSize: "1.8rem" }}>दृष्टि &middot; Drishti</h1>
         <p style={{ margin: 0, opacity: 0.7, fontSize: "0.9rem" }}>AI Walking Companion &mdash; P1 Skeleton</p>
@@ -908,61 +924,42 @@ function MainApp() {
         style={{
           width: "100%",
           maxWidth: "640px",
+          minWidth: 0,
           marginTop: "1rem",
           display: "flex",
+          flexDirection: "column",
           gap: "0.5rem",
-          alignItems: "center",
+          boxSizing: "border-box",
         }}
       >
-        <button
-          onClick={isRunning ? stopVision : startVision}
-          style={{
-            flex: 1,
-            padding: "0.9rem",
-            fontSize: "1.1rem",
-            fontWeight: "bold",
-            borderRadius: "8px",
-            border: "none",
-            background: isRunning ? "#dc2626" : "#2563eb",
-            color: "white",
-            cursor: "pointer",
-          }}
-        >
-          {isRunning ? "Stop Vision" : "Start Vision"}
-        </button>
-
-        <button
-          onClick={() => setLang((l) => (l === "en" ? "hi" : "en"))}
-          style={{
-            padding: "0.9rem 1.2rem",
-            fontSize: "1rem",
-            borderRadius: "8px",
-            border: "1px solid #52525b",
-            background: "#27272a",
-            color: "#fafafa",
-            cursor: "pointer",
-          }}
-        >
-          Language: {lang === "en" ? "EN" : "हिन्दी"}
-        </button>
-
-        <button
-          onClick={() => setSoftTickEnabled((e) => !e)}
-          style={{
-            padding: "0.9rem 1.2rem",
-            fontSize: "1rem",
-            borderRadius: "8px",
-            border: "1px solid #52525b",
-            background: softTickEnabled ? "#166534" : "#27272a",
-            color: "#fafafa",
-            cursor: "pointer",
-            opacity: isRunning ? 1 : 0.5,
-          }}
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", minWidth: 0 }}>
+          <button
+            onClick={isRunning ? stopVision : startVision}
+            style={{ flex: "1 1 140px", minWidth: 0, boxSizing: "border-box", padding: "0.9rem", fontSize: "1.1rem", fontWeight: "bold", borderRadius: "8px", border: "none", background: isRunning ? "#dc2626" : "#2563eb", color: "white", cursor: "pointer" }}
+          >
+            {isRunning ? "Stop Vision" : "Start Vision"}
+          </button>
+          <button
+            onClick={() => setLang((l) => (l === "en" ? "hi" : "en"))}
+            style={{ flex: "1 1 120px", minWidth: 0, boxSizing: "border-box", padding: "0.9rem", fontSize: "1rem", borderRadius: "8px", border: "1px solid #52525b", background: "#27272a", color: "#fafafa", cursor: "pointer" }}
+          >
+            Language: {lang === "en" ? "EN" : "हिन्दी"}
+          </button>
+          <button
+            onClick={() => setSoftTickEnabled((e) => !e)}
+            style={{ flex: "1 1 120px", minWidth: 0, boxSizing: "border-box", padding: "0.9rem", fontSize: "1rem", borderRadius: "8px", border: "1px solid #52525b", background: softTickEnabled ? "#166534" : "#27272a", color: "#fafafa", cursor: "pointer", opacity: isRunning ? 1 : 0.5 }}
+            disabled={!isRunning}
+            title={isRunning ? "Toggle soft tick (every 8s)" : "Start vision to enable"}
+          >
+            Soft Tick: {softTickEnabled ? "ON" : "OFF"}
+          </button>
+        </div>
+        <EmergencyButton
+          contacts={emergencyContacts}
+          userName={userName}
+          lang={lang}
           disabled={!isRunning}
-          title={isRunning ? "Toggle soft tick (every 8s)" : "Start vision to enable"}
-        >
-          Soft Tick: {softTickEnabled ? "ON" : "OFF"}
-        </button>
+        />
       </section>
 
       {/* Debug Overlay */}
@@ -1155,20 +1152,32 @@ function MainApp() {
           Last Spoken (phrase table): <strong style={{ color: "#f43f5e" }}>"{lastSpoken}"</strong>
         </div>
       </section>
+
+      {/* Emergency Screen Overlay (P6) */}
+      <EmergencyScreen
+        state={state}
+        countdown={countdown}
+        contactName={contactName}
+        lang={lang}
+        onCancel={cancel}
+        onCall112={() => {
+          // The EmergencyScreen now uses <a href="tel:112"> directly
+        }}
+        onSmsContact={() => {
+          // The EmergencyScreen now uses <a href="sms:..."> directly
+        }}
+        httpStatus={httpStatus}
+        lastRequestUrl={lastRequestUrl}
+        lastError={lastError}
+        eventLog={eventLog}
+        clearEventLog={clearEventLog}
+      />
     </main>
   );
 }
 
 /** Demo page for testing priority arbiter with manual buttons */
-function DemoPage() {
-  // Use shared language state via localStorage for persistence across pages
-  const [lang, setLang] = useState<"en" | "hi">(() => {
-    if (typeof window !== "undefined") {
-      const saved = localStorage.getItem("drishti-lang");
-      if (saved === "en" || saved === "hi") return saved;
-    }
-    return "en";
-  });
+function DemoPage({ lang, setLang }: { lang: "en" | "hi"; setLang: React.Dispatch<React.SetStateAction<"en" | "hi">> }) {
   const [queue, setQueue] = useState<string[]>([]);
   const [speaking, setSpeaking] = useState<string | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
@@ -1750,6 +1759,13 @@ function DemoPage() {
 /** Simple hash-based router */
 export default function RootApp() {
   const [hash, setHash] = useState(() => window.location.hash.slice(1) || "app");
+  const [lang, setLang] = useState<"en" | "hi">(() => {
+    if (typeof window !== "undefined") {
+      const saved = localStorage.getItem("drishti-lang");
+      if (saved === "en" || saved === "hi") return saved;
+    }
+    return "en";
+  });
 
   useEffect(() => {
     const onHashChange = () => setHash(window.location.hash.slice(1) || "app");
@@ -1757,7 +1773,74 @@ export default function RootApp() {
     return () => window.removeEventListener("hashchange", onHashChange);
   }, []);
 
-  if (hash === "demo") return <DemoPage />;
+  // Sync language to localStorage for shared state across pages
+  useEffect(() => {
+    localStorage.setItem("drishti-lang", lang);
+  }, [lang]);
+
+  const API_BASE = import.meta.env.VITE_API_BASE || "/api";
+
+  const getAuthToken = useCallback(async () => {
+    try {
+      const resp = await fetch(`${API_BASE}/auth/init`, { method: "POST" });
+      if (resp.ok) {
+        return await resp.json(); // { user_id, token }
+      }
+    } catch {
+      // Auth init failed
+    }
+    return null;
+  }, [API_BASE]);
+
+  const onEmergencySend = useCallback(
+    async (_contacts: string[], _userName: string, alerts: string[], auth?: { user_id: string; token: string } | null) => {
+      if (window.location.hash === "#emergency-demo") {
+        return { ok: false, error: "Demo mode", httpStatus: 0 };
+      }
+      if (!auth) {
+        return { ok: false, httpStatus: 401, error: "No auth token" };
+      }
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 25000); // 25s timeout
+      try {
+        const resp = await fetch(`${API_BASE}/emergency`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          signal: controller.signal,
+          body: JSON.stringify({
+            user_id: auth.user_id,
+            token: auth.token,
+            contacts: _contacts,
+            recent_alerts: alerts,
+            lang,
+            test: false,
+          }),
+        });
+        clearTimeout(timeoutId);
+        const data = await resp.json();
+        return {
+          ok: data.ok,
+          contactName: undefined,
+          httpStatus: resp.status,
+          error: data.ok ? undefined : (data.error || `HTTP ${resp.status}`)
+        };
+      } catch (err) {
+        clearTimeout(timeoutId);
+        if (err instanceof DOMException && err.name === "AbortError") {
+          return { ok: false, httpStatus: 0, error: "Request timeout" };
+        }
+        return { ok: false, httpStatus: 0, error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+    [lang, API_BASE]
+  );
+
+  if (hash === "demo") return <DemoPage lang={lang} setLang={setLang} />;
   if (hash === "tier1") return <Tier1ReviewPage onBack={() => { window.location.hash = ""; setHash("app"); }} />;
-  return <MainApp />;
+
+  return (
+    <EmergencyProvider lang={lang} onEmergencySend={onEmergencySend} getAuthToken={getAuthToken}>
+      {hash === "emergency-demo" ? <EmergencyDemoPage lang={lang} setLang={setLang} /> : <MainApp lang={lang} setLang={setLang} />}
+    </EmergencyProvider>
+  );
 }

@@ -594,3 +594,69 @@ export function makeCameraClearMessage(language: "en" | "hi"): ArbiterMessage {
   };
 }
 
+/** Factory for Emergency countdown instruction (P0). */
+export function makeEmergencyCountdownMessage(language: "en" | "hi"): ArbiterMessage {
+  const msg = SYSTEM_MESSAGES.emergency_countdown_instruction;
+  return {
+    priority: 0,
+    text: language === "hi" ? (msg?.hi ?? "सहायता अलर्ट १० सेकंड में. रद्द करने के लिए स्क्रीन टैप करें.") : (msg?.en ?? "Help alert in 10 seconds. Tap the screen to cancel."),
+    ttlMs: 0,
+    key: "emergency:countdown",
+    language,
+    timestamp: Date.now(),
+  };
+}
+
+/** Factory for Emergency triggered confirmation (P0). */
+export function makeEmergencyTriggeredMessage(language: "en" | "hi"): ArbiterMessage {
+  const msg = SYSTEM_MESSAGES.emergency_triggered;
+  return {
+    priority: 0,
+    text: language === "hi" ? (msg?.hi ?? "आपातकाल शुरू") : (msg?.en ?? "Emergency triggered"),
+    ttlMs: 0,
+    key: "emergency:triggered",
+    language,
+    timestamp: Date.now(),
+  };
+}
+
+/** Factory for Emergency cancelled (P0). */
+export function makeEmergencyCancelledMessage(language: "en" | "hi"): ArbiterMessage {
+  const msg = SYSTEM_MESSAGES.emergency_cancelled;
+  return {
+    priority: 0,
+    text: language === "hi" ? (msg?.hi ?? "आपातकाल रद्द") : (msg?.en ?? "Emergency cancelled"),
+    ttlMs: 0,
+    key: "emergency:cancelled",
+    language,
+    timestamp: Date.now(),
+  };
+}
+
+/** Factory for Emergency sent confirmation (P0). */
+export function makeEmergencySentMessage(language: "en" | "hi"): ArbiterMessage {
+  const msg = SYSTEM_MESSAGES.emergency_sent;
+  return {
+    priority: 0,
+    text: language === "hi" ? (msg?.hi ?? "सहायता संदेश भेजा. ११२ पर कॉल करने के लिए कहीं भी टैप करें") : (msg?.en ?? "Help message sent. Tap anywhere to call 112"),
+    ttlMs: 0,
+    key: "emergency:sent",
+    language,
+    timestamp: Date.now(),
+  };
+}
+
+/** Factory for Emergency send failed (P0). */
+export function makeEmergencyFailedMessage(language: "en" | "hi", contactName: string): ArbiterMessage {
+  const msg = SYSTEM_MESSAGES.emergency_failed;
+  const template = language === "hi" ? (msg?.hi ?? "{name} को संदेश भेजने के लिए कहीं भी टैप करें") : (msg?.en ?? "Could not send. Tap anywhere to text {name}");
+  return {
+    priority: 0,
+    text: template.replace("{name}", contactName),
+    ttlMs: 0,
+    key: "emergency:failed",
+    language,
+    timestamp: Date.now(),
+  };
+}
+

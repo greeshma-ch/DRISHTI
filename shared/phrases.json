@@ -51,6 +51,15 @@
     "camera_clear": { "en": "Camera clear", "hi": "कैमरा साफ़" },
     "detector_unavailable": { "en": "Detector unavailable", "hi": "डिटेक्टर अनुपलब्ध" },
     "emergency_triggered": { "en": "Emergency triggered", "hi": "आपातकाल शुरू" },
-    "emergency_cancelled": { "en": "Emergency cancelled", "hi": "आपातकाल रद्द" }
+    "emergency_cancelled": { "en": "Emergency cancelled", "hi": "आपातकाल रद्द" },
+    "emergency_countdown_instruction": { "en": "Help alert in 10 seconds. Tap the screen to cancel.", "hi": "सहायता अलर्ट १० सेकंड में. रद्द करने के लिए स्क्रीन टैप करें." },
+    "emergency_countdown_3": { "en": "Three", "hi": "तीन" },
+    "emergency_countdown_2": { "en": "Two", "hi": "दो" },
+    "emergency_countdown_1": { "en": "One", "hi": "एक" },
+    "emergency_sent": { "en": "Help message sent. Tap anywhere to call 112", "hi": "सहायता संदेश भेजा. ११२ पर कॉल करने के लिए कहीं भी टैप करें" },
+    "emergency_failed": { "en": "Could not send. Tap anywhere to text {name}", "hi": "{name} को संदेश भेजने के लिए कहीं भी टैप करें" },
+    "emergency_back_in_drishti": { "en": "Back in Drishti. Tap anywhere to finish.", "hi": "ड्रिस्टी में वापस। पूर्ण करने के लिए कहीं भी टैप करें।" },
+    "data_delete_confirm": { "en": "Delete all my data? Say yes to confirm.", "hi": "सारा डेटा मिटाएं? हाँ कहकर पुष्टि करें." },
+    "data_deleted": { "en": "All data deleted", "hi": "सारा डेटा मिटा दिया गया" }
   }
 }

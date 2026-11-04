@@ -1,5 +1,9 @@
 import "@testing-library/jest-dom";
 import { vi } from "vitest";
+import { act } from "react";
+
+// Make act globally available for tests
+(globalThis as any).act = act;
 
 // Polyfill for React 19 + jsdom
 // See: https://github.com/facebook/react/issues/25573

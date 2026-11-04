@@ -188,7 +188,19 @@ Throttle levels are defined in AGENTS.md (warn $60, throttle $90, block dev call
       - Production build in apps/web (tsc -b && vite build) passed with 0 errors.
       - Authored and committed README.md for GitHub submission strictly adhering to facts from AGENTS.md, PROGRESS.md, and code (architecture, priority arbiter, setup & run, measured CSV evaluation metrics, 228 test counts, and honest limitations).
 
-- Next: P5 Navigation, P6 Emergency flow, profile & onboarding
+  - **P6 Phase (a) Emergency Core — Implementation Complete & Verified**:
+    - **Server**: `auth.py` (stateless HMAC token + 20/hr IP rate limit), `emergency.py` (POST /emergency with 10/hr per-user cap, Telegram send, dry-run mode), `telegram_link.py` (GET /telegram/connect with HMAC start codes, POST /telegram/poll with getUpdates filtering, POST /telegram/manual fallback), `config.py` (EMERGENCY_HMAC_SECRET, EMERGENCY_DRY_RUN), `app.py` (router registration), `tests/test_p6_emergency.py` (33 tests covering token issue/verify, bounds, rate limits, dry-run, message format, Telegram connect/poll/manual, bot token security, startup config).
+    - **Client**: `EmergencyStateMachine.ts` (useEmergency hook: idle->countdown[10s+beep+3-2-1]->cancelled|sending->success|failure, no network during countdown), `EmergencyButton.tsx` (accessible red button, full-width mobile, triple-tap detector, contact count), `EmergencyScreen.tsx` (full-screen overlay, soft beep via Web Audio, success->tel:112 full-screen tap, failure->sms: first contact->112), `useVoiceHelp.ts` (SpeechRecognition for 'help'/'मदद', cancel on 'cancel'/'रुको'), `EmergencyDemoPage.tsx` (/#emergency-demo with 5 demo buttons, no real network), `arbiter.ts` (P0 emergency message factories), `phrases.json` (EN/HI emergency phrases).
+    - **Context Fix**: Single `EmergencyProvider` with `useEmergencyContext()` hook provides exactly one state machine instance. `useEmergencyContextOptional()` for test components. GPS watchPosition caching for SMS prefill. Instance ID for debug logging.
+    - **P6 Bug Fixes Applied**:
+      - Bug 1 (duplicate instances): Single EmergencyProvider context.
+      - Bug 2 (triple-tap during countdown): `countdownStartRef` ignores taps <1500ms into countdown.
+      - Bug 3 (contacts display): Shows 'N contacts loaded' with parse error debug.
+      - Bug 4 (Done button): Debug logging with instanceId/state; `reset()` + `clearEventLog()`; visibilitychange handler speaks 'Back in Drishti'.
+      - Bug 5 (voice-first failure): Single speak, whole screen SMS target via touch handler, 1s long press for 112, SMS prefill with cached GPS.
+      - Bug 6 (GPS caching): `watchPosition` in provider caches `lastGpsPosition` for SMS prefill.
+
+- Next: P5 Navigation, P6 Phase (b) Profile & contacts
 - Blockers: None
 
 ## Open issues and risks

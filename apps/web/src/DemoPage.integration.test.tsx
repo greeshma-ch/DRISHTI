@@ -1,7 +1,6 @@
 /** Integration test for DemoPage: verifies P1 interrupts P3 with proper cancellation of both speechSynthesis and audio clips. */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { act } from "react";
 import ReactDOM from "react-dom/client";
 import RootApp from "./App";
 

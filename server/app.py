@@ -10,10 +10,18 @@ from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from .auth import router as auth_router
 from .config import settings
+from .emergency import router as emergency_router
 from .meta_client import analyze_frame, get_perception_stats, get_total_spend, load_prices
 from .rate_limiter import init_rate_limiter, get_rate_limiter, RateLimiter
+from .telegram_link import router as telegram_router
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Drishti", version="0.0.1")
@@ -24,6 +32,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Register routers
+app.include_router(auth_router)
+app.include_router(emergency_router)
+app.include_router(telegram_router)
 
 
 # Initialize rate limiter at startup
@@ -39,8 +52,17 @@ async def startup_event() -> None:
 
 
 @app.get("/health")
-async def health() -> dict[str, str]:
-    return {"status": "ok"}
+async def health() -> dict[str, object]:
+    from .config import settings
+
+    telegram_configured = bool(
+        settings.TELEGRAM_BOT_TOKEN and settings.TELEGRAM_BOT_TOKEN != "changeme"
+    )
+    return {
+        "status": "ok",
+        "dry_run": getattr(settings, "EMERGENCY_DRY_RUN", False),
+        "telegram_configured": telegram_configured,
+    }
 
 
 @app.get("/spend")
