@@ -181,6 +181,13 @@ Throttle levels are defined in AGENTS.md (warn $60, throttle $90, block dev call
       - Phrase table: `avoid_actions.none = { en: "stop", hi: "रुकें" }` for center static hazards
       - Rendered Vision Status event log on both MainApp and DemoPage under "Vision Status Events" heading with copy log button
 
+    - **Verification & Documentation**:
+      - Fixed server/circuit_breaker.py lazy lock initialization to prevent loop binding issues across async test cases.
+      - Fixed server/tests/test_fault_injection.py rate limiter 429 assertion to be order-independent under concurrent asyncio.gather.
+      - Full test suites verified: 154/154 passed in apps/web (Vitest), 74/74 passed in server/tests (pytest) — 228 total tests.
+      - Production build in apps/web (tsc -b && vite build) passed with 0 errors.
+      - Authored and committed README.md for GitHub submission strictly adhering to facts from AGENTS.md, PROGRESS.md, and code (architecture, priority arbiter, setup & run, measured CSV evaluation metrics, 228 test counts, and honest limitations).
+
 - Next: P5 Navigation, P6 Emergency flow, profile & onboarding
 - Blockers: None
 
