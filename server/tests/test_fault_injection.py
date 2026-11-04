@@ -241,17 +241,16 @@ async def test_rate_limiter_429_returns_degraded() -> None:
 
         responses = await asyncio.gather(*[make_request(i) for i in range(4)])
 
-        # First 3 should succeed, 4th should be rate limited
-        for i, resp in enumerate(responses):
-            if i < 3:
-                assert resp.status_code == 200, f"Request {i+1} should be 200, got {resp.status_code}"
-            else:
-                assert resp.status_code == 429, f"Request {i+1} should be 429, got {resp.status_code}"
-                body = resp.json()
-                assert body["status"] == "degraded"
-                assert body["reason"] == "rate_limited"
-                assert "retry_after" in body
-                assert "Retry-After" in resp.headers
+        # Exactly 3 should succeed (burst limit = 3), 1 should be rate limited
+        status_codes = [resp.status_code for resp in responses]
+        assert status_codes.count(200) == 3, f"Expected 3 200s, got {status_codes}"
+        assert status_codes.count(429) == 1, f"Expected 1 429, got {status_codes}"
+        rate_limited_resp = next(resp for resp in responses if resp.status_code == 429)
+        body = rate_limited_resp.json()
+        assert body["status"] == "degraded"
+        assert body["reason"] == "rate_limited"
+        assert "retry_after" in body
+        assert "Retry-After" in rate_limited_resp.headers
 
 
 # Test 8: Spend > $120 (not FINAL_RUN) -> blocked, degraded result
