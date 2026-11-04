@@ -78,7 +78,7 @@ function playSoftBeep(): void {
  */
 export function useEmergency(
   lang: "en" | "hi" = "en",
-  onEmergencySend?: (contacts: string[], userName: string, recentAlerts: string[]) => Promise<{ ok: boolean; contactName?: string; httpStatus?: number; error?: string }>,
+  onEmergencySend?: (contacts: string[], userName: string, recentAlerts: string[], authToken?: { user_id: string; token: string } | null) => Promise<{ ok: boolean; contactName?: string; httpStatus?: number; error?: string }>,
   getAuthToken?: () => Promise<{ user_id: string; token: string } | null>
 ): UseEmergencyResult {
   const [state, setState] = useState<EmergencyState>("idle");
