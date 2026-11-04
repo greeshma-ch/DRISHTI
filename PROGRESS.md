@@ -200,6 +200,14 @@ Throttle levels are defined in AGENTS.md (warn $60, throttle $90, block dev call
       - Bug 5 (voice-first failure): Single speak, whole screen SMS target via touch handler, 1s long press for 112, SMS prefill with cached GPS.
       - Bug 6 (GPS caching): `watchPosition` in provider caches `lastGpsPosition` for SMS prefill.
 
+    - **CI Alignment with Local Checks**:
+      - Generated `server/requirements.txt` containing all runtime and development packages (fastapi, uvicorn, pydantic, pydantic-settings, python-dotenv, python-multipart, httpx, pytest, pytest-asyncio, ruff, mypy).
+      - Updated `.github/workflows/ci.yml` to run from repo root matching the Makefile: Python 3.12 with `pip install -r server/requirements.txt`, Node 20 with `npm ci --prefix apps/web`.
+      - Exported test-only environment variables in the workflow `env` block (`PYTHONPATH=.`, `EMERGENCY_DRY_RUN=true`, and dummy `EMERGENCY_HMAC_SECRET="ci-test-secret"`).
+      - Configured `.gitignore` to unignore and committed `apps/web/public/models/coco-ssd/*` offline model weights (18.7 MB total, largest shard 4.19 MB) alongside existing `apps/web/public/wasm/*` assets so clean checkouts have all offline resources.
+      - Resolved all `ruff` import order and line length rules across `server/` with `ignore = ["E501"]` in `server/pyproject.toml`.
+      - Ran local verification matching CI: 107 server tests passed, 204 web tests passed (311 total), linting and typechecking 100% clean.
+
 - Next: P5 Navigation, P6 Phase (b) Profile & contacts
 - Blockers: None
 
