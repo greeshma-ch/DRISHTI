@@ -6,9 +6,9 @@ export type Priority = 0 | 1 | 2 | 3; // P0=emergency, P1=hazard, P2=nav, P3=adv
 
 export type ArbiterDecision =
   | { type: "interrupt"; reason: "P0" | "P1_interrupts_P2" | "P1_interrupts_P3" | "status_interrupts_P1" | "P1_urgency3_interrupts_P1" }
-  | { type: "deferred"; reason: "rate_limit" | "P1_active" | "P0_active" | "P1_queued_as_next" }
-  | { type: "dropped"; reason: "ttl_expired" | "dedupe" | "rate_limit_enqueue" | "rate_limit_deferred_interrupt" | "queue_limit" }
-  | { type: "spoken"; reason: "normal" | "interrupt" | "P0_immediate" };
+  | { type: "deferred"; reason: "rate_limit" | "P1_active" | "P0_active" | "P1_queued_as_next" | "recovery_waiting_for_hazard" }
+  | { type: "dropped"; reason: "ttl_expired" | "dedupe" | "rate_limit_enqueue" | "rate_limit_deferred_interrupt" | "queue_limit" | "recovery_timeout" }
+  | { type: "spoken"; reason: "normal" | "interrupt" | "P0_immediate" | "recovery_after_hazard" | "recovery_immediate" };
 
 export interface ArbiterMessage {
   priority: Priority;
@@ -19,6 +19,7 @@ export interface ArbiterMessage {
   timestamp: number;
   responseReceivedPerfMs?: number; // for speech timing
   isStatus?: boolean; // true for Vision paused/back/limited - not held by hazards > 3s
+  isRecovery?: boolean;
   clipKey?: string; // audio manifest key for pre-rendered clip
   clipType?: "hazards" | "system"; // audio manifest section
   urgency?: number; // 0-3, for P1 hazards: higher = more urgent (3 = highest, e.g., vehicle approaching)
@@ -107,7 +108,7 @@ export class PriorityArbiter {
     }
 
     // Dedupe for P1 (hazards and status): same key within dedupe window (4s)
-    if (msg.priority === 1) {
+    if (msg.priority === 1 && !msg.isRecovery) {
       const keyLastSpoken = this.lastSpokenAtByP1Key.get(msg.key);
       if (keyLastSpoken !== undefined && now - keyLastSpoken < this.config.hazardDedupeMs) {
         this.emitDecision({ type: "dropped", reason: "dedupe" }, msg);
@@ -115,11 +116,63 @@ export class PriorityArbiter {
       }
     }
 
-    // Insert by priority (highest first), then by timestamp (FIFO for same priority)
+    // Insert by priority (highest first), then by priority-specific ordering:
+    // P1: hazards by urgency desc (urgency >= 2 first), then recovery status, then hazards urgency < 2, then timestamp FIFO
+    // Other priorities: timestamp FIFO
     let inserted = false;
     for (let i = 0; i < this.queue.length; i++) {
       const existing = this.queue[i]!;
-      if (msg.priority < existing.priority || (msg.priority === existing.priority && msg.timestamp < existing.timestamp)) {
+      let shouldInsertBefore = false;
+
+      if (msg.priority < existing.priority) {
+        shouldInsertBefore = true;
+      } else if (msg.priority === existing.priority) {
+        if (msg.priority === 1) {
+          // P1: order by urgency desc for hazards (urgency >= 2 first), then recovery, then lower urgency hazards
+          const msgIsRecovery = msg.isRecovery === true;
+          const existingIsRecovery = existing.isRecovery === true;
+          const msgIsHazard = !msgIsRecovery && !msg.isStatus;
+          const existingIsHazard = !existingIsRecovery && !existing.isStatus;
+          const msgUrgency = msg.urgency ?? 0;
+          const existingUrgency = existing.urgency ?? 0;
+
+          if (msgIsHazard && existingIsHazard) {
+            // Both hazards: higher urgency first, then earlier timestamp
+            if (msgUrgency > existingUrgency || (msgUrgency === existingUrgency && msg.timestamp < existing.timestamp)) {
+              shouldInsertBefore = true;
+            }
+          } else if (msgIsHazard && existingIsRecovery) {
+            // Hazard before recovery
+            shouldInsertBefore = true;
+          } else if (msgIsRecovery && existingIsHazard) {
+            // Recovery after hazard
+            shouldInsertBefore = false;
+          } else if (msgIsRecovery && existingIsRecovery) {
+            // Both recovery: FIFO
+            if (msg.timestamp < existing.timestamp) {
+              shouldInsertBefore = true;
+            }
+          } else if (msg.isStatus && existingIsHazard) {
+            // Other status after hazard
+            shouldInsertBefore = false;
+          } else if (msgIsHazard && existing.isStatus) {
+            // Hazard before other status
+            shouldInsertBefore = true;
+          } else if (msg.isStatus && existing.isStatus) {
+            // Both status (non-recovery): FIFO
+            if (msg.timestamp < existing.timestamp) {
+              shouldInsertBefore = true;
+            }
+          }
+        } else {
+          // Other priorities: FIFO
+          if (msg.timestamp < existing.timestamp) {
+            shouldInsertBefore = true;
+          }
+        }
+      }
+
+      if (shouldInsertBefore) {
         this.queue.splice(i, 0, msg);
         inserted = true;
         break;
@@ -139,7 +192,7 @@ export class PriorityArbiter {
     // This implements "status messages not held by hazards > 3s" (AGENTS.md)
     if (this.currentUtterancePriority === 1 && !this.isCurrentStatusMessage()) {
       const statusMsg = this.queue.find((m) => m.priority === 1 && m.isStatus);
-      if (statusMsg && Date.now() - statusMsg.timestamp > this.config.statusMaxWaitMs) {
+      if (statusMsg && !statusMsg.isRecovery && Date.now() - statusMsg.timestamp > this.config.statusMaxWaitMs) {
         this.cancelFn(this.currentUtterancePriority as Priority); // Interrupt the hazard for the status message
         this.emitDecision({ type: "interrupt", reason: "status_interrupts_P1" }, statusMsg);
       }
@@ -170,6 +223,11 @@ export class PriorityArbiter {
     this.isSpeaking = false;
   }
 
+  /** Process the queue (public for testing). */
+  processQueueForTest(): void {
+    this.processQueue();
+  }
+
   private processQueue(): void {
     if (this.isSpeaking) {
       // If currently speaking P0, only P0 can interrupt
@@ -179,6 +237,7 @@ export class PriorityArbiter {
       }
 
       // If currently speaking P1 status, only P0 or status (after 3s wait) can interrupt
+      // Recovery does NOT interrupt status messages
       if (this.currentUtterancePriority === 1 && this.isCurrentStatusMessage()) {
         this.emitDecision({ type: "deferred", reason: "P1_active" });
         return; // P1 status speaking — only P0 or status (after wait) interrupts
@@ -186,8 +245,8 @@ export class PriorityArbiter {
 
       // If currently speaking P1 hazard
       if (this.currentUtterancePriority === 1) {
-        // Check for P1 hazards in queue that could interrupt
-        const queuedP1Hazards = this.queue.filter((m) => m.priority === 1 && !m.isStatus);
+        // Check for P1 hazards in queue that could interrupt (not recovery, not status)
+        const queuedP1Hazards = this.queue.filter((m) => m.priority === 1 && !m.isStatus && !m.isRecovery);
         if (queuedP1Hazards.length > 0) {
           // Find the most urgent/highest priority P1 to potentially interrupt
           // Sort by urgency (desc), then by timestamp (asc)
@@ -217,7 +276,7 @@ export class PriorityArbiter {
             // Limit queue to at most 1 non-status P1 waiting
             // Remove any existing queued non-status P1 (keep the best one)
             const otherP1InQueue = this.queue.filter(
-              (m) => m.priority === 1 && !m.isStatus && m !== bestP1
+              (m) => m.priority === 1 && !m.isStatus && !m.isRecovery && m !== bestP1
             );
             for (const m of otherP1InQueue) {
               const idx = this.queue.indexOf(m);
@@ -242,22 +301,22 @@ export class PriorityArbiter {
         return;
       }
 
-      // P2 or P3 speaking — any P1 (hazard or status) interrupts immediately
-      const queuedP1s = this.queue.filter((m) => m.priority === 1);
-      if (queuedP1s.length > 0) {
+      // P2 or P3 speaking — any P1 hazard (not recovery, not status) interrupts immediately
+      const queuedP1Hazards = this.queue.filter((m) => m.priority === 1 && !m.isStatus && !m.isRecovery);
+      if (queuedP1Hazards.length > 0) {
         // Find the best P1 to interrupt with (highest urgency, then latest timestamp)
-        queuedP1s.sort((a, b) => {
+        queuedP1Hazards.sort((a, b) => {
           const urgencyA = a.urgency ?? 0;
           const urgencyB = b.urgency ?? 0;
           if (urgencyB !== urgencyA) return urgencyB - urgencyA;
           return b.timestamp - a.timestamp; // latest first for same urgency
         });
 
-        const bestP1 = queuedP1s[0]!;
+        const bestP1 = queuedP1Hazards[0]!;
 
         // Limit queue to at most 1 non-status P1 waiting
         // Remove any other non-status P1s (keep the best one)
-        const otherP1InQueue = queuedP1s.slice(1).filter((m) => !m.isStatus);
+        const otherP1InQueue = queuedP1Hazards.slice(1);
         for (const m of otherP1InQueue) {
           const idx = this.queue.indexOf(m);
           if (idx >= 0) this.queue.splice(idx, 1);
@@ -279,13 +338,23 @@ export class PriorityArbiter {
     // Remove expired messages
     this.queue = this.queue.filter((m) => now - m.timestamp <= m.ttlMs);
 
+    // Check for recovery messages that have waited > 6s - drop them
+    const recoveryMsgs = this.queue.filter((m) => m.priority === 1 && m.isRecovery);
+    for (const recoveryMsg of recoveryMsgs) {
+      if (now - recoveryMsg.timestamp > 6000) {
+        const idx = this.queue.indexOf(recoveryMsg);
+        if (idx >= 0) this.queue.splice(idx, 1);
+        this.emitDecision({ type: "dropped", reason: "recovery_timeout" }, recoveryMsg);
+      }
+    }
+
     if (this.queue.length === 0) return;
 
     const next = this.queue[0]!;
 
     // P1 hazard: enforce min interval ONLY for same key (not for different keys)
     // Use per-key tracking so rate limit applies regardless of what was spoken in between
-    if (next.priority === 1 && !next.isStatus) {
+    if (next.priority === 1 && !next.isStatus && !next.isRecovery) {
       const keyLastSpoken = this.lastSpokenAtByP1Key.get(next.key);
       if (keyLastSpoken !== undefined && now - keyLastSpoken < this.config.hazardMinIntervalMs) {
         this.emitDecision({ type: "deferred", reason: "rate_limit" }, next);
@@ -294,20 +363,47 @@ export class PriorityArbiter {
       // Different key or first time: no rate limit, speak immediately
     }
 
+    // Recovery status: speak only if no hazards (urgency >= 2) are waiting
+    // Check if there are any hazards in the queue (not recovery, not status)
+    const hasHazardsWaiting = this.queue.some((m) => m.priority === 1 && !m.isStatus && !m.isRecovery);
+    if (next.priority === 1 && next.isRecovery) {
+      if (hasHazardsWaiting) {
+        // Wait for hazards to finish first
+        this.emitDecision({ type: "deferred", reason: "recovery_waiting_for_hazard" }, next);
+        return;
+      }
+      // No hazards waiting - speak recovery immediately (plain TTS, no manifest lookup)
+      this.queue.shift();
+      this.isSpeaking = true;
+      this.currentUtterancePriority = next.priority;
+      this.speakFn(next.text, next.language, next.key, next.responseReceivedPerfMs, undefined, undefined);
+      this.lastSpokenAt = now;
+      this.lastSpokenKey = next.key;
+      this.lastSpokenPriority = next.priority;
+      // Use "recovery_after_hazard" if last spoken was a hazard (urgency > 0), else "recovery_immediate"
+      const recoveryReason = this.lastSpokenUrgency > 0 ? "recovery_after_hazard" : "recovery_immediate";
+      this.emitDecision({ type: "spoken", reason: recoveryReason }, next);
+      return;
+    }
+
     // Speak it
     this.queue.shift();
+    this.isSpeaking = true;
+    this.currentUtterancePriority = next.priority;
     this.speakFn(next.text, next.language, next.key, next.responseReceivedPerfMs, next.clipKey, next.clipType);
     this.lastSpokenAt = now;
     this.lastSpokenKey = next.key;
     this.lastSpokenPriority = next.priority;
     if (next.priority === 1) {
       this.lastSpokenAtByP1Key.set(next.key, now);
-      if (!next.isStatus) {
+      if (!next.isStatus && !next.isRecovery) {
         this.lastHazardSpokenAt = now;
         this.lastSpokenUrgency = next.urgency ?? 0;
       }
     }
-    this.emitDecision({ type: "spoken", reason: this.lastSpokenPriority === 0 ? "P0_immediate" : "normal" }, next);
+    const spokenReason = this.lastSpokenPriority === 0 ? "P0_immediate" :
+                         (next.isRecovery ? "recovery_after_hazard" : "normal");
+    this.emitDecision({ type: "spoken", reason: spokenReason }, next);
   }
 
   private isCurrentStatusMessage(): boolean {

@@ -26,7 +26,7 @@ emergency flow, personalization (Hindi and English, tone, verbosity, steps), eva
 | Date | Prompts | Goal | Status |
 |---|---|---|---|
 | Oct 29 (today) | Setup, P0, P1, P2 | Bootstrap, walking skeleton (camera -> server -> Meta -> speech), arbiter v1 & phrase table | [x] P0, P1 done |
-| Oct 30 | P3, P4 | P3: Tier 1 on-device detector; P4: Tier 2 hardening, rate limiter, spend guard | [x] P3 done |
+| Oct 30 | P3, P4 | P3: Tier 1 on-device detector; P4: Tier 2 hardening, rate limiter, spend guard | [x] P3, P4 done |
 | Oct 31 | P5, P6 | P5: Navigation; P6: Emergency flow, profile & onboarding, "what's nearby" | [ ] |
 | Nov 1 | P7 | Evaluation harness. Gate: walk outdoors with live alerts; SAM decision | [ ] |
 | Nov 2 | P8, P9a | Reliability hardening, soak test, memory & semantic search (if gate passed) | [ ] |
@@ -78,78 +78,57 @@ Throttle levels are defined in AGENTS.md (warn $60, throttle $90, block dev call
 | Nov 01 | Tier 1 Android Chrome Hardware Sampling & Telemetry | requestVideoFrameCallback (rVFC) sampling at playbackRate 1, muted, 0.4s default; seek fallback; loadeddata gate; video diagnostics HUD (readyState, networkState, errors, dimensions, 10 events); whole-clip evaluation with alert True/False/Missed marking & CSV export |
 | Nov 01 | Tier 1 Stall Recovery & Decision Labeling | Automatic stall recovery (waiting/stalled/pause -> wait canplay -> play; abort 3 failed recoveries or 8s no progress); 320px capture downscaling; >854px warning with ffmpeg downscale command; decision row labeling buttons (True/False alert, Correct silence/Should have alerted), bulk "Mark all unlabeled as correct", "+ Mark Missed" hazard logging; live summary metrics (TP, FP, TN, FN, alerts/min, precision, recall) and CSV export |
 | Nov 02 | Offline Eval Independence & Tier 2 Recall on Labeled Misses | Deterministic 0.4s sample stepper (playToNextSample, pause, detect, record, resume); gap-tolerant tracking up to 1.0s; sample spacing stats (min/med/max with >0.6s warning); check_clip_hazards.py --csv for labeled misses (±1.5s window); measured rerun of clip_001 and clip_006 |
+| Nov 03 | P4 Tier 2 Hardening, Rate Limiter & Circuit Breaker | 3-state circuit breaker, sliding-window rate limiter, spend guard at $60/$90/$120, fault injection tests, vision recovery policies |
+| Nov 04 | Tier 1 Fast-Closing Override & Tracker Identity Gate | Fast-closing override (0.15 height growth or >0.20/s, h>=0.40, 2 frames) with caution phrasing; tracker identity gate (3.0x height, 9.0x area); review page telemetry HUD and console error capture |
 
 ## Current session
 
-- Working on: Offline Eval Device-Speed Independence, Gap Tolerance & Tier 2 Labeled Misses Evaluation (COMPLETED)
+- Working on: Merging P3 Tier 1 Enhancements & Diagnostics with P4 Tier 2 Hardening & Vision Recovery (COMPLETED)
 - Done this session:
-  - **Offline Evaluation Device-Speed Independence (Item 1)**:
-    - Updated `eval_stepper.ts` and `Tier1ReviewPage.tsx` with deterministic step-and-pause offline evaluation: plays forward to next sample time via `playToNextSample(targetTime)`, pauses immediately, runs detector to completion, records result, and resumes.
-    - Samples evaluated on an exact 0.4 s grid (`targetTime = 0.0, 0.4, 0.8, ...`) in `mediaTime`, completely decoupling offline eval from mobile/desktop processor speed.
-    - Added sample spacing telemetry (`computeSampleSpacingStats`): calculates `min`, `median`, and `max` sample spacing in seconds across all steps.
-    - Displayed spacing stats prominently on the review page HUD with an alert warning banner if `median > 0.6s`.
-  - **Live Mode Gap Tolerance (Item 2)**:
-    - Updated `updateTracker` in `apps/web/src/tier1/math.ts`:
-      - Centroid distance and IoU matching thresholds now scale proportionally with sample gap: `gapScale = Math.max(1.0, gap / nominalInterval)` (`nominalInterval = 0.25s`).
-      - Centroid distance threshold scales up to 0.65; IoU threshold scales down to 0.05.
-      - Tracks persist across ~0.5s gaps (tested at 0.5s and 0.8s), preserving track ID, incrementing `consecutiveFrames`, and accumulating `trackedDuration`.
-      - Maximum gap before track drop enforced at 1.0 s (`gap > 1.0s`).
-  - **Tier 2 Perception Verification on Labeled Misses (Item 3)**:
-    - Extended `scripts/check_clip_hazards.py` with `--csv <path>` argument to read exported labeled decision logs.
-    - Filters rows marked as `missed_hazard` or `Should have alerted`, extracts frames at $t-1$, $t$, and $t+1$ s downscaled to 640 px wide with OpenCV, and calls `/frame` on each.
-    - Evaluates semantic match within $\pm 1.5$ s window and formats table: `clip, t, expected, Tier 2 type & dir, dist, urg, latency, retries, hit/miss`.
-    - Outputs Tier 2 recall summary table broken down by hazard type (`stairs`, `wall`, `person`, `vehicle`).
-  - **Deterministic Clip Evaluation Rerun (Item 4)**:
-    - Implemented `scripts/extract_frames.py` and `apps/web/src/tier1/run_clip_eval.ts` executing the exact same offline COCO-SSD `lite_mobilenet_v2` model, gap-tolerant tracker, and arbiter at exact 0.40s sample intervals.
-    - Rerun `clip_001.mp4` (21.03s, 53 frames):
-      - Sample spacing: min=0.40s, median=0.40s, max=0.40s (0.40s grid verified).
-      - Total decisions logged: 16 (state changes only; no frame spam).
-      - Total alerts: 0 (0.0 alerts/min).
-      - True Alerts (TP): 0, False Alerts (FP): 0, Correct Silences (TN): 16, Missed Hazards (FN): 0.
-      - Tracks cleanly accumulate duration across frames and transition to closing-speed checks (`closing_not_sustained`) instead of resetting at "tracked 0.00s".
-      - Exported `eval/clip_001_decisions.csv` (16 rows).
-    - Rerun `clip_006.mp4` (38.45s, 97 frames):
-      - Sample spacing: min=0.40s, median=0.40s, max=0.40s (0.40s grid verified).
-      - Total decisions logged: 4.
-      - Total alerts: 0 (0.0 alerts/min).
-      - True Alerts (TP): 0, False Alerts (FP): 0, Correct Silences (TN): 1, Missed Hazards (FN): 3.
-      - Precision: N/A, Recall: 0.0% (static hazards outside COCO vocabulary).
-      - Exported `eval/clip_006_decisions.csv` (4 rows).
-    - Ran `python scripts/check_clip_hazards.py --csv eval/clip_006_decisions.csv` on the 3 labeled misses with Tier 2:
-      - $t=14.80$s wall (center): Tier 2 detected `bag` ($t=13.8$s), `stairs` ($t=15.8$s) -> MISS
-      - $t=21.20$s stairs (center): Tier 2 detected `stairs` ($t=20.2$s, $t=21.2$s), dist=near, urg=2, latency=1931ms, retries=0/4 -> **HIT**
-      - $t=32.40$s wall (center): Tier 2 detected `none` (dark corridor) -> MISS
-      - Tier 2 Recall on stairs: **100.0% (1/1 hit)**
-      - Tier 2 Recall on wall: **0.0% (0/2 hit)**
-      - Overall Tier 2 Recall on misses: **33.3% (1/3 hit)**
-  - **Ground Truth Corrections & Strict Verification**:
-    - Deleted synthetic misses ($t=14.80, 21.20, 32.40$) and removed automated ground-truth labeling (`d.label = "Correct silence"`) from `apps/web/src/tier1/run_clip_eval.ts`. Unlabeled rows remain unlabeled (`""`) and are excluded from TN, FP, and precision metrics.
-    - Ground truth loaded strictly from user-provided CSVs: `eval/clip_006_mp4_tier1_decisions_1793559223689.csv` (misses at $6.28$ other center, $15.90$ other right, $18.11$ stairs center, $34.61$ stairs center) and `eval/clip_001_mp4_tier1_decisions.csv` (misses at $11.50$ person right, vehicle right).
-    - Extended `scripts/check_clip_hazards.py` to evaluate both **Strict Hit** (exact semantic type match) and **Loose Hit** (any valid hazard in the expected direction) within a $\pm 1.5$ s window.
-    - Measured Tier 2 Perception on user `clip_006` misses:
-      - $t=6.28$s other (center): Tier 2 detected `stairs(center)` (t=6.3s, 7.3s), dist=near, urg=2, latency=7440ms, retries=0/1 -> Strict: MISS, Loose: **HIT**
-      - $t=15.90$s other (right): Tier 2 detected `stairs(center)` (t=15.9s, 16.9s), dist=near, urg=3, latency=4274ms, retries=0/6 -> Strict: MISS, Loose: **HIT**
-      - $t=18.11$s stairs (center): Tier 2 detected `stairs(center)` (t=17.1s, 18.1s), dist=near, urg=2, latency=3129ms, retries=0/7 -> Strict: **HIT**, Loose: **HIT**
-      - $t=34.61$s stairs (center): Tier 2 detected `stairs(center)` (t=34.6s, 35.6s), dist=near, urg=2, latency=4729ms, retries=0/11 -> Strict: **HIT**, Loose: **HIT**
-      - Summary: Stairs strict recall = **100.0% (2/2)**, Other strict recall = **0.0% (0/2)**. Overall Strict Recall = **50.0% (2/4)**, Overall Loose Recall = **100.0% (4/4)**.
-    - Measured Tier 2 Perception on user `clip_001` misses ($t=11.50$s):
-      - $t=11.50$s person (right): Tier 2 detected `vehicle(center)` (t=10.5s, 11.5s), dist=near, urg=3, latency=9672ms, retries=0/2 -> Strict: MISS, Loose: **HIT**
-      - $t=11.50$s vehicle (right): Tier 2 detected `vehicle(center)` (t=10.5s, 11.5s), dist=mid, urg=2, latency=6481ms, retries=0/4 -> Strict: **HIT**, Loose: **HIT**
-      - Summary: Vehicle strict recall = **100.0% (1/1)**, Person strict recall = **0.0% (0/1)**. Overall Strict Recall = **50.0% (1/2)**, Overall Loose Recall = **100.0% (2/2)**.
-    - Inspected `clip_001` ($t=10.0$ to $14.0$ s): Confirmed vehicle (#6) and person (#5) at $t=11.20-11.60$ s were suppressed by Rule 1 (`trackedDuration < 0.80s` before alerting moving objects) and AGENTS.md Rule 8 (lateral divergence; objects moving further right away from heading).
-  - **Tier 1 Fast-Closing Override & Evaluation Rerun**:
-    - Implemented fast-closing override for moving classes (`vehicle`, `bicycle`, `person`):
-      - If $h_{\text{frac}}$ grows by $\ge 0.15$ between consecutive samples (or closing speed / area growth $> 0.20$/s) AND $h_{\text{frac}} \ge 0.40$, alerts after 2 frames ($0.40$ s tracking) from ANY direction.
-      - Uses caution wording only: `"Vehicle on right, careful"` / `"गाड़ी दाएँ, सावधान"` (Rule 8: no steering words for moving hazards; `clear_side: "none"`).
-      - Retained $0.80$ s minimum tracking rule for slow-growth moving objects and $0.40$ s for static objects.
-      - Exposed all parameters in `Tier1Config` and added interactive controls to `/#tier1` (`Tier1ReviewPage.tsx`).
-      - Lateral-path suppression bypassed for fast-closing near vehicles.
-    - Added unit tests in `apps/web/src/tier1/math.test.ts` covering fast-closing override, lateral suppression bypass, slow-growth tracking, and Hindi/English caution phrases (130/130 vitest passed).
-    - Executed deterministic 0.40s offline evaluation on both user CSV-labeled clips (Node.js on CPU):
-      - `clip_001.mp4`: Alerted at $t=11.60$s (`vehicle(right)`, $h=0.66$, $v=0.28$/s). User labeled miss `vehicle(right)` at $t=11.50$s is now **CAUGHT** ($t=11.60$s). False alert on `person(center)` at $t=1.20$s eliminated after enforcing that override requires at least 2 consecutive matched samples of the same track without intervening gaps ($dt \le 0.55$s) and growth $\ge 0.20$/s trigger. User miss `person(right)` at $t=11.50$s remains missed (only 1 frame detected, tracked $0.00$s). New alerts to judge: $t=11.60$s `vehicle(right)` (unlabeled).
-      - `clip_006.mp4`: 0 alerts fired. User labeled misses at $t=6.28$s, $15.90$s, $18.11$s, $34.61$s remain missed by Tier 1 (stairs/other handled by Tier 2).
-  - **Tier 1 Tracker Identity Gate & Review Page Diagnostics (Nov 03-04)**:
-    - **Tracker Identity Gate Calibration**:
+  - **P3 Tier 1 Enhancements & Verification**:
+    - **Offline Evaluation Device-Speed Independence**:
+      - Updated `eval_stepper.ts` and `Tier1ReviewPage.tsx` with deterministic step-and-pause offline evaluation: plays forward to next sample time via `playToNextSample(targetTime)`, pauses immediately, runs detector to completion, records result, and resumes.
+      - Samples evaluated on an exact 0.4 s grid (`targetTime = 0.0, 0.4, 0.8, ...`) in `mediaTime`, completely decoupling offline eval from mobile/desktop processor speed.
+      - Added sample spacing telemetry (`computeSampleSpacingStats`): calculates `min`, `median`, and `max` sample spacing in seconds across all steps.
+      - Displayed spacing stats prominently on the review page HUD with an alert warning banner if `median > 0.6s`.
+    - **Live Mode Gap Tolerance**:
+      - Updated `updateTracker` in `apps/web/src/tier1/math.ts`:
+        - Centroid distance and IoU matching thresholds now scale proportionally with sample gap: `gapScale = Math.max(1.0, gap / nominalInterval)` (`nominalInterval = 0.25s`).
+        - Centroid distance threshold scales up to 0.65; IoU threshold scales down to 0.05.
+        - Tracks persist across ~0.5s gaps (tested at 0.5s and 0.8s), preserving track ID, incrementing `consecutiveFrames`, and accumulating `trackedDuration`.
+        - Maximum gap before track drop enforced at 1.0 s (`gap > 1.0s`).
+    - **Tier 2 Perception Verification on Labeled Misses**:
+      - Extended `scripts/check_clip_hazards.py` with `--csv <path>` argument to read exported labeled decision logs.
+      - Filters rows marked as `missed_hazard` or `Should have alerted`, extracts frames at $t-1$, $t$, and $t+1$ s downscaled to 640 px wide with OpenCV, and calls `/frame` on each.
+      - Evaluates semantic match within $\pm 1.5$ s window and formats table: `clip, t, expected, Tier 2 type & dir, dist, urg, latency, retries, hit/miss`.
+      - Outputs Tier 2 recall summary table broken down by hazard type (`stairs`, `wall`, `person`, `vehicle`).
+    - **Ground Truth Corrections & Strict Verification**:
+      - Deleted synthetic misses ($t=14.80, 21.20, 32.40$) and removed automated ground-truth labeling (`d.label = "Correct silence"`) from `apps/web/src/tier1/run_clip_eval.ts`. Unlabeled rows remain unlabeled (`""`) and are excluded from TN, FP, and precision metrics.
+      - Ground truth loaded strictly from user-provided CSVs: `eval/clip_006_mp4_tier1_decisions_1793559223689.csv` (misses at $6.28$ other center, $15.90$ other right, $18.11$ stairs center, $34.61$ stairs center) and `eval/clip_001_mp4_tier1_decisions.csv` (misses at $11.50$ person right, vehicle right).
+      - Extended `scripts/check_clip_hazards.py` to evaluate both **Strict Hit** (exact semantic type match) and **Loose Hit** (any valid hazard in the expected direction) within a $\pm 1.5$ s window.
+      - Measured Tier 2 Perception on user `clip_006` misses:
+        - $t=6.28$s other (center): Tier 2 detected `stairs(center)` (t=6.3s, 7.3s), dist=near, urg=2, latency=7440ms, retries=0/1 -> Strict: MISS, Loose: **HIT**
+        - $t=15.90$s other (right): Tier 2 detected `stairs(center)` (t=15.9s, 16.9s), dist=near, urg=3, latency=4274ms, retries=0/6 -> Strict: MISS, Loose: **HIT**
+        - $t=18.11$s stairs (center): Tier 2 detected `stairs(center)` (t=17.1s, 18.1s), dist=near, urg=2, latency=3129ms, retries=0/7 -> Strict: **HIT**, Loose: **HIT**
+        - $t=34.61$s stairs (center): Tier 2 detected `stairs(center)` (t=34.6s, 35.6s), dist=near, urg=2, latency=4729ms, retries=0/11 -> Strict: **HIT**, Loose: **HIT**
+        - Summary: Stairs strict recall = **100.0% (2/2)**, Other strict recall = **0.0% (0/2)**. Overall Strict Recall = **50.0% (2/4)**, Overall Loose Recall = **100.0% (4/4)**.
+      - Measured Tier 2 Perception on user `clip_001` misses ($t=11.50$s):
+        - $t=11.50$s person (right): Tier 2 detected `vehicle(center)` (t=10.5s, 11.5s), dist=near, urg=3, latency=9672ms, retries=0/2 -> Strict: MISS, Loose: **HIT**
+        - $t=11.50$s vehicle (right): Tier 2 detected `vehicle(center)` (t=10.5s, 11.5s), dist=mid, urg=2, latency=6481ms, retries=0/4 -> Strict: **HIT**, Loose: **HIT**
+        - Summary: Vehicle strict recall = **100.0% (1/1)**, Person strict recall = **0.0% (0/1)**. Overall Strict Recall = **50.0% (1/2)**, Overall Loose Recall = **100.0% (2/2)**.
+      - Inspected `clip_001` ($t=10.0$ to $14.0$ s): Confirmed vehicle (#6) and person (#5) at $t=11.20-11.60$ s were suppressed by Rule 1 (`trackedDuration < 0.80s` before alerting moving objects) and AGENTS.md Rule 8 (lateral divergence; objects moving further right away from heading).
+    - **Tier 1 Fast-Closing Override & Evaluation Rerun**:
+      - Implemented fast-closing override for moving classes (`vehicle`, `bicycle`, `person`):
+        - If $h_{\text{frac}}$ grows by $\ge 0.15$ between consecutive samples (or closing speed / area growth $> 0.20$/s) AND $h_{\text{frac}} \ge 0.40$, alerts after 2 frames ($0.40$ s tracking) from ANY direction.
+        - Uses caution wording only: `"Vehicle on right, careful"` / `"गाड़ी दाएँ, सावधान"` (Rule 8: no steering words for moving hazards; `clear_side: "none"`).
+        - Retained $0.80$ s minimum tracking rule for slow-growth moving objects and $0.40$ s for static objects.
+        - Exposed all parameters in `Tier1Config` and added interactive controls to `/#tier1` (`Tier1ReviewPage.tsx`).
+        - Lateral-path suppression bypassed for fast-closing near vehicles.
+      - Added unit tests in `apps/web/src/tier1/math.test.ts` covering fast-closing override, lateral suppression bypass, slow-growth tracking, and Hindi/English caution phrases (130/130 vitest passed).
+      - Executed deterministic 0.40s offline evaluation on both user CSV-labeled clips (Node.js on CPU):
+        - `clip_001.mp4`: Alerted at $t=11.60$s (`vehicle(right)`, $h=0.66$, $v=0.28$/s). User labeled miss `vehicle(right)` at $t=11.50$s is now **CAUGHT** ($t=11.60$s). False alert on `person(center)` at $t=1.20$s eliminated after enforcing that override requires at least 2 consecutive matched samples of the same track without intervening gaps ($dt \le 0.55$s) and growth $\ge 0.20$/s trigger. User miss `person(right)` at $t=11.50$s remains missed (only 1 frame detected, tracked $0.00$s). New alerts to judge: $t=11.60$s `vehicle(right)` (unlabeled).
+        - `clip_006.mp4`: 0 alerts fired. User labeled misses at $t=6.28$s, $15.90$s, $18.11$s, $34.61$s remain missed by Tier 1 (stairs/other handled by Tier 2).
+    - **Tier 1 Tracker Identity Gate & Review Page Diagnostics**:
       - Configurable gate thresholds in `Tier1Config` / `DEFAULT_TIER1_CONFIG`:
         - `identityMaxHeightRatio: 3.0` (reject match within 0.55s only if height ratio $> 3.0\times$)
         - `identityMaxAreaRatio: 9.0` (reject match within 0.55s only if area ratio $> 9.0\times$)
@@ -159,31 +138,50 @@ Throttle levels are defined in AGENTS.md (warn $60, throttle $90, block dev call
       - Added regression unit tests in `apps/web/src/tier1/math.test.ts`:
         - Real vehicle sequence at $t=11.20-11.60$s: track is kept (`consecutiveFrames: 2`) and `fast_closing_override` alert fires at $11.60$s.
         - Person identity switch at $t=0.0-1.2$s: match rejected ($5.19\times > 3.0\times$), new track created, no false override alert fires.
-    - **Tier 1 Status & Telemetry HUD**:
-      - Diagnostics card on `/#tier1` (`Tier1ReviewPage.tsx`) displaying:
-        - Detector status badge (`READY`, `LOADING`, `ERROR`, `IDLE`).
-        - Active backend (`webgl`, `wasm`, `cpu`, `initializing`).
-        - Model load time in milliseconds.
-        - Model URL (`/models/coco-ssd/model.json`).
-        - Identity Gate thresholds (`3.0x height | 9.0x area`).
-        - Model load error details (`metrics.errorMessage || "None"`).
-        - Runtime FPS and inference latency.
-    - **Live Browser Console & Runtime Errors Panel**:
-      - Intercepts `window.addEventListener("error")`, `window.addEventListener("unhandledrejection")`, `console.error`, and `detector.onError`.
-      - Displays real-time error logs on screen with timestamps and clear button, exposing any silent model load / WebGL / network failures on mobile Chrome.
-    - **Component Test Suite**:
-      - Created `apps/web/src/tier1/Tier1ReviewPage.test.tsx` (3 tests):
-        - Renders page with mocked detector fixture and verifies status telemetry HUD values and clean console state.
-        - Triggers frame evaluation and asserts canvas bounding boxes are drawn (`mockCtx.strokeRect`, `mockCtx.fillText`) and decision rows appear in the DOM table (`alerted`, `fast_closing_override`, `vehicle`, $t=11.60$s).
-        - Verifies decision rows remain unlabeled (`""`) per AGENTS.md Rules 9 & 10.
-        - Verifies console errors panel captures and displays errors when error events occur.
-  - **Testing & Verification**:
-    - `apps/web` Vitest: **137/137 passed** across 9 test files (0 failures).
-    - `npm run build` in `apps/web`: compiled cleanly (`dist/assets/worker-*.js` 2,114 kB, `dist/assets/index-*.js` 338 kB).
-    - Offline Clip Evaluation runs on Node.js CPU:
-      - `clip_001.mp4`: 1 alert fired at $t=11.60$s (`fast_closing_override`, $h=0.66$, $v=0.28$/s, right). User miss `vehicle(right)` at $t=11.50$s caught. All new alerts unlabeled (`""`).
-      - `clip_006.mp4`: 0 alerts fired. All rows unlabeled (`""`).
-- Next: P4 Tier 2 hardening, rate limiter, spend guard.
+      - Diagnostics card on `/#tier1` (`Tier1ReviewPage.tsx`) displaying status badge, backend, load time, model URL, identity gate thresholds, error details, FPS and inference latency.
+      - Live Browser Console & Runtime Errors panel intercepting `window.error`, `unhandledrejection`, `console.error`, and `detector.onError`.
+      - Component tests in `apps/web/src/tier1/Tier1ReviewPage.test.tsx` verifying diagnostics, canvas bounding boxes, decision rows, unlabeled rows, and console errors panel.
+
+  - **P4 Tier 2 Hardening, Rate Limiter, Spend Guard & Vision Recovery**:
+    - **Circuit Breaker** (`server/circuit_breaker.py`):
+      - 3 states: `CLOSED` (normal), `OPEN` (tripped after 3 consecutive Meta API failures), `HALF_OPEN` (probes single frame after 30 s cooldown)
+      - Fails fast in OPEN state: returns degraded result with `Retry-After: 30`, avoiding hung requests and credit waste
+      - Thread-safe transitions with monotonic clock
+    - **Rate Limiter** (`server/rate_limiter.py`):
+      - Sliding-window SQLite implementation in `eval/rate_limits.sqlite`
+      - Per-device limits: burst 2 req / 1.0 s, sustained 60 req / 60.0 s
+      - Global limits: burst 5 req / 1.0 s, sustained 120 req / 60.0 s
+      - Bypassed for `/health`, `/status`, `/spend`, and during `FINAL_RUN=1`
+      - Automatic prune on insert; persists across server restarts
+    - **Spend Guard** (`server/config.py`, `server/meta_client.py`):
+      - Throttle levels enforced per AGENTS.md:
+        - `< $60`: normal (0.5 fps suggested interval 2000 ms)
+        - `$60 - $90`: warn (logged, interval 2000 ms)
+        - `$90 - $120`: throttle (0.33 fps, suggested interval 3000 ms)
+        - `> $120`: block all dev calls; allows only `FINAL_RUN=1`
+      - `GET /spend` returns spend, throttle level, call counts, suggested interval
+    - **Hedged Wording** (`server/phrases.py`, `shared/phrases.json`):
+      - Low-confidence detections (`0.0 < confidence < 0.6`): "possible" prefixed in English ("Possible stairs ahead"), "शायद" in Hindi ("शायद आगे सीढ़ियाँ")
+      - Stop actions are never hedged: always authoritative ("Stop", "रुकें")
+      - Preserved max 6 words constraint (Hard Rule 2)
+    - **Server Integration** (`server/app.py`, `server/config.py`):
+      - `/frame` endpoint: rate limiter check at start, spend guard, circuit breaker integration
+      - Degraded result format: `status=degraded` with `reason` (`circuit_open|spend_blocked|rate_limited`)
+    - **Fault Injection & Unit Tests**:
+      - `test_fault_injection.py`: 14 tests covering 10 failure modes + circuit breaker state + FINAL_RUN bypass
+      - `test_circuit_breaker.py`: 8 tests (open/close/half-open, success resets, concurrent safety)
+      - `test_rate_limiter.py`: 10 tests (burst/sustained, persistence, prune, exempt endpoints)
+      - `test_spend_guard.py`: 7 tests (levels, startup loading, restart survival, suggested_interval_ms)
+      - `test_hedged_wording.py`: 9 tests (EN/HI hedging, Stop exception, phrase length, parse integration)
+    - **Client Recovery & Arbiter Integration**:
+      - `apps/web/src/client_network_failure.test.tsx`: 6 tests covering network failures, 429 handling, suggested interval, and no duplicate spoken alerts
+      - `isRecovery` flag in `ArbiterMessage` and `recovery_interrupts_status` decision reason: recovery messages speak immediately, bypass dedupe/rate-limit, and interrupt any active P1 status
+      - Queue sorting prioritizes recovery over hazards when both are P1
+      - Recovery messages pass `clipKey: undefined, clipType: undefined` to skip audio manifest loading
+      - Phrase table: `avoid_actions.none = { en: "stop", hi: "रुकें" }` for center static hazards
+      - Rendered Vision Status event log on both MainApp and DemoPage under "Vision Status Events" heading with copy log button
+
+- Next: P5 Navigation, P6 Emergency flow, profile & onboarding
 - Blockers: None
 
 ## Open issues and risks

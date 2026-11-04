@@ -73,6 +73,9 @@ export interface Tier1Metrics {
   loadTimeMs: number;
   status: "idle" | "loading" | "ready" | "error";
   errorMessage?: string;
+  errorUrl?: string;
+  errorStatus?: number;
+  errorDetail?: string;
   alertsPerMin?: number;
 }
 

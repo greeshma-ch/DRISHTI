@@ -106,7 +106,7 @@ def test_parse_perception_mixed_valid_invalid_hazards() -> None:
     assert result.hazards[0].urgency == 1
     assert result.hazards[0].confidence == 0.6
     assert result.hazards[1].type == "step_down"
-    assert result.instruction == "Step down ahead"
+    assert result.instruction == "Step down, stop"
     assert result.status == "hazard"
 
 
@@ -206,11 +206,11 @@ def test_clear_only_possible_from_valid_parse_with_empty_hazards() -> None:
 
 def test_parse_perception_instruction_shortened_to_4_words() -> None:
     raw = json.dumps({
-        "hazards": [{"type": "pole", "direction": "center"}],
+        "hazards": [{"type": "pole", "direction": "center", "confidence": 0.95}],
     })
     result = parse_perception_response(raw)
     assert len(result.instruction.split()) <= 4
-    assert result.instruction == "Pole ahead"
+    assert result.instruction == "Pole ahead, stop"
 
 
 def test_spend_calculation_and_record(tmp_path: Path) -> None:
@@ -237,6 +237,7 @@ async def test_analyze_frame_with_mock_client() -> None:
                             "distance": "near",
                             "clear_side": "right",
                             "urgency": 2,
+                            "confidence": 0.95,
                         },
                     })
                 },
@@ -424,11 +425,11 @@ def test_chair_center_specific_phrase() -> None:
     # 3. chair center, clear_side none
     assert (
         build_phrase("chair", direction="center", clear_side="none", lang="hi")
-        == "कुर्सी आगे"
+        == "कुर्सी आगे, रुकें"
     )
     assert (
         build_phrase("chair", direction="center", clear_side="none", lang="en")
-        == "Chair ahead"
+        == "Chair ahead, stop"
     )
 
     # Via parse_perception_response
@@ -438,6 +439,7 @@ def test_chair_center_specific_phrase() -> None:
             "direction": "center",
             "clear_side": "right",
             "urgency": 2,
+            "confidence": 0.95,
         }
     })
     res_hi = parse_perception_response(raw, lang="hi")
@@ -447,14 +449,14 @@ def test_chair_center_specific_phrase() -> None:
 
 
 def test_other_with_label() -> None:
-    # "other" with a label speaks "{label} आगे"
+    # "other" with a label speaks "{label} आगे, रुकें" for center static hazards
     assert (
         build_phrase("other", direction="center", clear_side="none", label="कार्ट", lang="hi")
-        == "कार्ट आगे"
+        == "कार्ट आगे, रुकें"
     )
     assert (
         build_phrase("other", direction="center", clear_side="none", label="cart", lang="en")
-        == "cart ahead"
+        == "cart ahead, stop"
     )
 
     # With clear_side
@@ -475,10 +477,11 @@ def test_other_with_label() -> None:
             "clear_side": "none",
             "label": "कार्ट",
             "urgency": 1,
+            "confidence": 0.95,
         }
     })
     res_hi = parse_perception_response(raw, lang="hi")
-    assert res_hi.instruction == "कार्ट आगे"
+    assert res_hi.instruction == "कार्ट आगे, रुकें"
     assert res_hi.hazards[0].label == "कार्ट"
 
 
@@ -486,11 +489,11 @@ def test_other_without_label() -> None:
     # "other" without a label uses generic word for "hazard"
     assert (
         build_phrase("other", direction="center", clear_side="none", label=None, lang="hi")
-        == "खतरा आगे"
+        == "खतरा आगे, रुकें"
     )
     assert (
         build_phrase("other", direction="center", clear_side="none", label=None, lang="en")
-        == "Hazard ahead"
+        == "Hazard ahead, stop"
     )
 
     # With clear_side
@@ -511,10 +514,11 @@ def test_other_without_label() -> None:
             "clear_side": "none",
             "label": None,
             "urgency": 1,
+            "confidence": 0.95,
         }
     })
     res_hi = parse_perception_response(raw, lang="hi")
-    assert res_hi.instruction == "खतरा आगे"
+    assert res_hi.instruction == "खतरा आगे, रुकें"
 
 
 def test_never_path_clear() -> None:

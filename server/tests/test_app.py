@@ -22,12 +22,16 @@ def test_health() -> None:
 
 def test_spend_empty() -> None:
     with patch("server.app.SPEND_LOG", Path(tempfile.mktemp())):
-        r = client.get("/spend")
-        assert r.status_code == 200
-        data = r.json()
-        assert data["total_usd"] == 0.0
-        assert data["records"] == 0
-        assert data["level"] == "normal"
+        with patch("server.meta_client.SPEND_LOG", Path(tempfile.mktemp())):
+            import server.meta_client as mc
+            mc._spend_loaded = False
+            mc._total_spend_usd = 0.0
+            r = client.get("/spend")
+            assert r.status_code == 200
+            data = r.json()
+            assert data["total_usd"] == 0.0
+            assert data["records"] == 0
+            assert data["level"] == "normal"
 
 
 def test_spend_warn_level() -> None:
@@ -35,7 +39,11 @@ def test_spend_warn_level() -> None:
         for _ in range(10):
             f.write(json.dumps({"est_cost_usd": 7.0}) + "\n")
         f.flush()
-        with patch("server.app.SPEND_LOG", Path(f.name)):
+        with patch("server.meta_client.SPEND_LOG", Path(f.name)):
+            # Reset the in-memory spend total
+            import server.meta_client as mc
+            mc._spend_loaded = False
+            mc._total_spend_usd = 0.0
             r = client.get("/spend")
             data = r.json()
             assert data["total_usd"] == 70.0
@@ -46,7 +54,10 @@ def test_spend_throttle_level() -> None:
     with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
         f.write(json.dumps({"est_cost_usd": 100.0}) + "\n")
         f.flush()
-        with patch("server.app.SPEND_LOG", Path(f.name)):
+        with patch("server.meta_client.SPEND_LOG", Path(f.name)):
+            import server.meta_client as mc
+            mc._spend_loaded = False
+            mc._total_spend_usd = 0.0
             r = client.get("/spend")
             data = r.json()
             assert data["total_usd"] == 100.0
@@ -57,7 +68,10 @@ def test_spend_blocked_level() -> None:
     with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
         f.write(json.dumps({"est_cost_usd": 130.0}) + "\n")
         f.flush()
-        with patch("server.app.SPEND_LOG", Path(f.name)):
+        with patch("server.meta_client.SPEND_LOG", Path(f.name)):
+            import server.meta_client as mc
+            mc._spend_loaded = False
+            mc._total_spend_usd = 0.0
             r = client.get("/spend")
             data = r.json()
             assert data["total_usd"] == 130.0

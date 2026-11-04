@@ -15,11 +15,45 @@ from pydantic import BaseModel, Field, field_validator
 
 from .config import settings
 from .phrases import build_phrase
+from .circuit_breaker import call_with_circuit_breaker, DEGRADED_RESULT as CB_DEGRADED_RESULT
 
 logger = logging.getLogger(__name__)
 
 SPEND_LOG = Path("eval/spend.jsonl")
 PRICES_FILE = Path("server/prices.json")
+
+# In-memory running spend total (loaded from file at startup, updated on each call)
+_total_spend_usd: float = 0.0
+_spend_loaded: bool = False
+
+
+def _load_spend_total() -> float:
+    """Load total spend from eval/spend.jsonl into memory. Called once at startup."""
+    global _total_spend_usd, _spend_loaded
+    if not SPEND_LOG.exists():
+        _total_spend_usd = 0.0
+        _spend_loaded = True
+        return 0.0
+    total = 0.0
+    try:
+        for line in SPEND_LOG.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                row = json.loads(line)
+                total += float(row.get("est_cost_usd", 0.0))
+    except Exception:
+        pass
+    _total_spend_usd = round(total, 6)
+    _spend_loaded = True
+    logger.info("Spend guard: loaded total $%.4f from %s", _total_spend_usd, SPEND_LOG)
+    return _total_spend_usd
+
+
+def get_total_spend(log_path: Path | None = None) -> float:
+    """Get current total spend (from in-memory running total)."""
+    if not _spend_loaded:
+        _load_spend_total()
+    return _total_spend_usd
+
 
 VALID_HAZARD_TYPES = {
     "chair",
@@ -143,6 +177,8 @@ class PerceptionResult(BaseModel):
     path_clear: bool = False
     instruction: str = "unknown"
     signage_text: list[str] = []
+    suggested_interval_ms: int | None = None
+    reason: str | None = None
 
 
 UNKNOWN_RESULT = PerceptionResult(
@@ -161,6 +197,37 @@ VISION_LIMITED_RESULT = PerceptionResult(
     path_clear=False,
     instruction="Vision limited",
     signage_text=[],
+)
+
+# Degraded results for different reasons
+DEGRADED_CIRCUIT_OPEN = PerceptionResult(
+    status="degraded",
+    hazard=None,
+    hazards=[],
+    path_clear=False,
+    instruction="Vision limited, moving-object alerts only",
+    signage_text=[],
+    reason="circuit_open",
+)
+
+DEGRADED_SPEND_BLOCKED = PerceptionResult(
+    status="degraded",
+    hazard=None,
+    hazards=[],
+    path_clear=False,
+    instruction="Vision limited, moving-object alerts only",
+    signage_text=[],
+    reason="spend_blocked",
+)
+
+DEGRADED_RATE_LIMITED = PerceptionResult(
+    status="degraded",
+    hazard=None,
+    hazards=[],
+    path_clear=False,
+    instruction="Vision limited, moving-object alerts only",
+    signage_text=[],
+    reason="rate_limited",
 )
 
 _consecutive_parse_failures: int = 0
@@ -233,24 +300,10 @@ def calculate_cost(
     return round((input_tokens * in_rate) + (output_tokens * out_rate) + (images * img_rate), 6)
 
 
-def get_total_spend(log_path: Path | None = None) -> float:
-    path = log_path or SPEND_LOG
-    if not path.exists():
-        return 0.0
-    total = 0.0
-    try:
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                row = json.loads(line)
-                total += float(row.get("est_cost_usd", 0.0))
-    except Exception:
-        pass
-    return round(total, 6)
-
-
 def record_spend(
     model: str, input_tokens: int, output_tokens: int, images: int, est_cost_usd: float
 ) -> None:
+    global _total_spend_usd
     record = {
         "ts": time.time(),
         "model": model,
@@ -263,6 +316,7 @@ def record_spend(
     SPEND_LOG.parent.mkdir(parents=True, exist_ok=True)
     with SPEND_LOG.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")
+    _total_spend_usd = round(_total_spend_usd + est_cost_usd, 6)
 
 
 def parse_perception_response(
@@ -306,12 +360,15 @@ def parse_perception_response(
                 hazard = max(valid_hazards, key=lambda x: x.urgency)
 
         if hazard is not None:
+            # Apply hedged wording based on confidence
+            confidence = hazard.confidence
             instruction = build_phrase(
                 hazard_type=hazard.type,
                 direction=hazard.direction,
                 clear_side=hazard.clear_side,
                 label=hazard.label,
                 lang=lang,
+                confidence=confidence,
             )
             status = "hazard"
             path_clear = False
@@ -348,19 +405,39 @@ async def analyze_frame(
     image_bytes: bytes,
     lang: str = "en",
     client: httpx.AsyncClient | None = None,
+    timeout: float | None = None,
 ) -> tuple[PerceptionResult, dict[str, Any], float, dict[str, float]]:
-    """Call Meta Model API with image and return (result, usage_dict, latency_ms, timings)."""
+    """Call Meta Model API with image and return (result, usage_dict, latency_ms, timings).
+
+    Args:
+        image_bytes: JPEG image data
+        lang: Language code ("en" or "hi")
+        client: Optional httpx.AsyncClient to use
+        timeout: Per-attempt timeout in seconds for circuit breaker (default from settings)
+    """
     global _consecutive_parse_failures, _total_frames, _retry_frames, _reasoning_tokens_history
-    current_spend = get_total_spend()
+
+    # Ensure spend total is loaded
+    if not _spend_loaded:
+        _load_spend_total()
+
+    current_spend = _total_spend_usd
     now_ts = time.time()
+
+    # Spend guard: block at $120 (unless FINAL_RUN)
     if current_spend >= 120.0 and not settings.FINAL_RUN:
         logger.error("Spend guard blocked call: current spend $%.2f exceeds limit", current_spend)
         return (
-            UNKNOWN_RESULT,
+            DEGRADED_SPEND_BLOCKED,
             {"error": "spend_limit_exceeded", "finish_reason": "blocked"},
             0.0,
             {"meta_call_start": now_ts, "meta_call_end": now_ts},
         )
+
+    # Spend guard: throttle at $90 (suggest longer interval)
+    suggested_interval_ms = None
+    if current_spend >= 90.0:
+        suggested_interval_ms = 4000  # 4 seconds
 
     _total_frames += 1
     did_retry = False
@@ -408,9 +485,29 @@ async def analyze_frame(
         resp.raise_for_status()
         return resp.json(), t0, t1
 
+    async def call_api_with_circuit_breaker(max_tokens: int):
+        """Wrap the API call with circuit breaker."""
+        return await call_with_circuit_breaker(call_api(max_tokens), timeout=timeout or settings.CIRCUIT_BREAKER_TIMEOUT)
+
     try:
         # First attempt: max_tokens = 800
-        raw_json, m_start, m_end = await call_api(max_tokens=800)
+        cb_result = await call_api_with_circuit_breaker(max_tokens=800)
+
+        # Check if circuit breaker returned degraded result
+        if isinstance(cb_result, dict) and cb_result.get("status") == "degraded":
+            meta_call_end = time.time()
+            latency_ms = round((time.perf_counter() - start_time) * 1000, 1)
+            degraded = DEGRADED_CIRCUIT_OPEN
+            if suggested_interval_ms:
+                degraded = degraded.model_copy(update={"suggested_interval_ms": suggested_interval_ms})
+            return (
+                degraded,
+                {"error": "circuit_open", "finish_reason": "circuit_open"},
+                latency_ms,
+                {"meta_call_start": meta_call_start, "meta_call_end": meta_call_end},
+            )
+
+        raw_json, m_start, m_end = cb_result
         meta_call_start, meta_call_end = m_start, m_end
         latency_ms = round((time.perf_counter() - start_time) * 1000, 1)
 
@@ -434,7 +531,23 @@ async def analyze_frame(
                 finish_reason,
                 not bool(content.strip()),
             )
-            raw_json, m_start, m_end = await call_api(max_tokens=1200)
+            cb_result = await call_api_with_circuit_breaker(max_tokens=1200)
+
+            # Check circuit breaker again
+            if isinstance(cb_result, dict) and cb_result.get("status") == "degraded":
+                meta_call_end = time.time()
+                latency_ms = round((time.perf_counter() - start_time) * 1000, 1)
+                degraded = DEGRADED_CIRCUIT_OPEN
+                if suggested_interval_ms:
+                    degraded = degraded.model_copy(update={"suggested_interval_ms": suggested_interval_ms})
+                return (
+                    degraded,
+                    {"error": "circuit_open", "finish_reason": "circuit_open"},
+                    latency_ms,
+                    {"meta_call_start": meta_call_start, "meta_call_end": meta_call_end},
+                )
+
+            raw_json, m_start, m_end = cb_result
             meta_call_end = m_end
             latency_ms = round((time.perf_counter() - start_time) * 1000, 1)
 
@@ -484,9 +597,13 @@ async def analyze_frame(
             "retries_display": f"{_retry_frames} / {_total_frames}",
             "did_retry": did_retry,
         }
+        if suggested_interval_ms:
+            usage_info["suggested_interval_ms"] = suggested_interval_ms
 
         if parsed is not None:
             _consecutive_parse_failures = 0
+            if suggested_interval_ms:
+                parsed = parsed.model_copy(update={"suggested_interval_ms": suggested_interval_ms})
             return (
                 parsed,
                 usage_info,
@@ -496,6 +613,8 @@ async def analyze_frame(
 
         _consecutive_parse_failures += 1
         res = VISION_LIMITED_RESULT if _consecutive_parse_failures >= 3 else UNKNOWN_RESULT
+        if suggested_interval_ms and res != VISION_LIMITED_RESULT:
+            res = res.model_copy(update={"suggested_interval_ms": suggested_interval_ms})
         return (
             res,
             usage_info,
@@ -509,6 +628,8 @@ async def analyze_frame(
         logger.warning("Meta API call failed (%s): %s", type(exc).__name__, exc)
         _consecutive_parse_failures += 1
         res = VISION_LIMITED_RESULT if _consecutive_parse_failures >= 3 else UNKNOWN_RESULT
+        if suggested_interval_ms and res != VISION_LIMITED_RESULT:
+            res = res.model_copy(update={"suggested_interval_ms": suggested_interval_ms})
         return (
             res,
             {"error": str(exc), "finish_reason": "error"},

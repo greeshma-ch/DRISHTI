@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from .config import settings
-from .meta_client import analyze_frame, get_perception_stats, get_total_spend
+from .meta_client import analyze_frame, get_perception_stats, get_total_spend, load_prices
+from .rate_limiter import init_rate_limiter, get_rate_limiter, RateLimiter
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Drishti", version="0.0.1")
 
@@ -21,7 +26,16 @@ app.add_middleware(
 )
 
 
+# Initialize rate limiter at startup
 SPEND_LOG = Path("eval/spend.jsonl")
+
+
+@app.on_event("startup")
+async def startup_event() -> None:
+    """Initialize rate limiter and load spend total on startup."""
+    init_rate_limiter()
+    # Load spend total into memory (meta_client.get_total_spend does this lazily)
+    get_total_spend()
 
 
 @app.get("/health")
@@ -46,11 +60,14 @@ async def spend() -> dict[str, object]:
     else:
         level = "blocked"
 
+    prices = load_prices()
+
     return {
         "total_usd": round(total, 4),
         "records": records,
         "level": level,
         "final_run": settings.FINAL_RUN,
+        "prices_used": prices,
     }
 
 
@@ -70,18 +87,54 @@ async def server_status() -> dict[str, object]:
     }
 
 
+def _get_user_id(request: Request) -> str:
+    """Extract user ID from X-User-Id header, fallback to client IP."""
+    user_id = request.headers.get("X-User-Id")
+    if user_id:
+        return user_id
+    # Fallback to client IP
+    client = request.client
+    if client:
+        return client.host
+    return "unknown"
+
+
 @app.post("/frame")
 async def process_frame(
+    request: Request,
     file: UploadFile = File(...),
     timestamp: float = Form(...),
     lang: str = Form("en"),
 ) -> dict[str, object]:
+    # Rate limiter check - consume token on every request (use async version)
+    rate_limiter: RateLimiter = get_rate_limiter()
+    # Ensure rate limiter is initialized (startup event may not run in tests)
+    if rate_limiter.db_path is None:
+        from .rate_limiter import init_rate_limiter
+        init_rate_limiter()
+        rate_limiter = get_rate_limiter()
+    user_id = _get_user_id(request)
+    logger.info("Rate limiter check for user_id=%s, endpoint=frame", user_id)
+    allowed, retry_after = await rate_limiter._async_consume(user_id, "frame", 1)
+    logger.info("Rate limiter result: allowed=%s, retry_after=%s", allowed, retry_after)
+    if not allowed:
+        return JSONResponse(
+            status_code=429,
+            content={
+                "status": "degraded",
+                "reason": "rate_limited",
+                "retry_after": retry_after,
+            },
+            headers={"Retry-After": str(retry_after)},
+        )
+
     t_start = time.perf_counter()
     image_bytes = await file.read()
     result, usage, latency_ms, _ = await analyze_frame(image_bytes, lang=lang)
     server_total_ms = round((time.perf_counter() - t_start) * 1000, 1)
 
-    return {
+    # Build response with degraded format if needed
+    response = {
         "perception": result.model_dump(),
         "usage": usage,
         "latency_ms": latency_ms,
@@ -92,3 +145,5 @@ async def process_frame(
         "retries_display": usage.get("retries_display", "0 / 0"),
         "median_reasoning_tokens": usage.get("median_reasoning_tokens", 0.0),
     }
+
+    return response
