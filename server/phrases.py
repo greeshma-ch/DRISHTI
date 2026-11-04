@@ -33,12 +33,16 @@ def build_phrase(
     clear_side: str = "none",
     label: str | None = None,
     lang: str = "en",
+    confidence: float = 1.0,
 ) -> str:
     """Build a fixed alert phrase of <= 4 words in Hindi or English.
 
     Hard Rule 1: Never returns 'path clear' or implies safety.
     Hard Rule 8: Never instruct a lateral move for moving objects.
     Returns '' if no hazard.
+
+    Low confidence (< 0.6): prefix with "possible " / "संभावित "
+    Exception: Never add "possible" to a Stop phrase (e.g., "Vehicle ahead, stop" stays as-is)
     """
     if not hazard_type:
         return ""
@@ -61,11 +65,23 @@ def build_phrase(
     # 2. Moving hazard (Hard Rule 8: Caution word plus position; NO steering)
     if h_type in MOVING_HAZARDS:
         if dir_code == "center":
-            return f"{noun} आगे, रुकें" if lang_code == "hi" else f"{noun} ahead, stop"
+            phrase = f"{noun} आगे, रुकें" if lang_code == "hi" else f"{noun} ahead, stop"
         elif dir_code == "left":
-            return f"{noun} बाएँ, सावधान" if lang_code == "hi" else f"{noun} on left, careful"
+            phrase = f"{noun} बाएँ, सावधान" if lang_code == "hi" else f"{noun} on left, careful"
         elif dir_code == "right":
-            return f"{noun} दाएँ, सावधान" if lang_code == "hi" else f"{noun} on right, careful"
+            phrase = f"{noun} दाएँ, सावधान" if lang_code == "hi" else f"{noun} on right, careful"
+
+        # Apply hedged wording for low confidence
+        # But NEVER add "possible" to a Stop phrase (phrases ending with "stop" or "रुकें")
+        if confidence < 0.6:
+            if lang_code == "en" and not phrase.endswith("stop"):
+                phrase = f"possible {phrase}"
+            elif lang_code == "hi" and not phrase.endswith("रुकें"):
+                phrase = f"संभावित {phrase}"
+
+        # Ensure <= 4 words
+        words = phrase.split()
+        return " ".join(words[:4])
 
     # 3. Static obstacle: steering allowed only if clear_side provided
     dir_info = DIRECTIONS.get(dir_code, DIRECTIONS["center"])
@@ -82,10 +98,20 @@ def build_phrase(
         else:
             candidate = f"{noun} {dir_word}, {avoid_action}"
         if len(candidate.split()) <= 4:
-            return candidate
+            phrase = candidate
+        else:
+            phrase = f"{noun} {dir_word}"
+    else:
+        phrase = f"{noun} {dir_word}"
 
-    base = f"{noun} {dir_word}"
-    words = base.split()
+    # Apply hedged wording for low confidence
+    if confidence < 0.6:
+        if lang_code == "en" and not phrase.endswith("stop"):
+            phrase = f"possible {phrase}"
+        elif lang_code == "hi" and not phrase.endswith("रुकें"):
+            phrase = f"संभावित {phrase}"
+
+    words = phrase.split()
     return " ".join(words[:4])
 
 

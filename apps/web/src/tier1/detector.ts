@@ -380,7 +380,13 @@ export class Tier1Detector {
       }
       if (this.metrics.status === "loading") {
         this.metrics.status = "error";
+        const errUrl = (data as any).url;
+        const errStatus = (data as any).status;
+        const errMessage = (data as any).message ?? data.error;
         this.metrics.errorMessage = data.error;
+        this.metrics.errorUrl = errUrl;
+        this.metrics.errorStatus = errStatus;
+        this.metrics.errorDetail = errMessage;
         this.notifyMetrics();
         this.notifyError(data.error ?? "Unknown error");
       }

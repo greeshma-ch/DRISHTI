@@ -35,6 +35,7 @@ interface FrameUsage {
   est_cost_usd?: number;
   retries_display?: string;
   median_reasoning_tokens?: number;
+  suggested_interval_ms?: number;
 }
 
 interface PerceptionResponse {
@@ -44,6 +45,8 @@ interface PerceptionResponse {
     path_clear: boolean;
     instruction: string;
     signage_text?: string[];
+    status?: "clear" | "degraded" | string;
+    reason?: "circuit_open" | "spend_blocked" | "rate_limited" | string;
   };
   usage: FrameUsage & { finish_reason?: string };
   latency_ms: number;
@@ -131,6 +134,14 @@ function MainApp() {
   const [durations, setDurations] = useState<FrameDurations | null>(null);
   const [softTickEnabled, setSoftTickEnabled] = useState(true); // Soft tick every 8s
 
+  // Vision status event log
+  const [visionEventLog, setVisionEventLog] = useState<Array<{ time: number; event: string; reason: string }>>([]);
+  const addVisionEvent = (event: string) => {
+    const now = Date.now();
+    const reason = event.match(/(?:reason[=:]|\()([^ )]+)/)?.[1] ?? "—";
+    setVisionEventLog((prev) => [...prev, { time: now, event, reason }].slice(-20));
+  };
+
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const inFlightRef = useRef<number>(0);
@@ -151,15 +162,25 @@ function MainApp() {
   const arbiterRef = useRef<PriorityArbiter | null>(null);
   const currentDurationsRef = useRef<FrameDurations | null>(null);
 
-  // Vision watchdog state
+  // Vision watchdog state machine: "ok" | "degraded" | "recovering"
+  type VisionState = "ok" | "degraded" | "recovering";
+  const visionStateRef = useRef<VisionState>("ok");
   const consecutiveFailuresRef = useRef<number>(0);
-  const isVisionDegradedRef = useRef<boolean>(false);
   const visionLimitedIntervalRef = useRef<number | null>(null);
   const lastVisionBackRef = useRef<number>(0);
   const isCameraBlockedRef = useRef<boolean>(false);
   const lastTier2HazardRef = useRef<{ type: string; direction: string; distance: string } | null>(null);
   const tier2LastAnnouncedMapRef = useRef<Map<string, { time: number; distance: string }>>(new Map());
   const tier2BackoffTimeoutRef = useRef<number | null>(null);
+
+  // Helper to transition vision state and log
+  const setVisionState = (newState: VisionState, reason: string) => {
+    const prevState = visionStateRef.current;
+    if (prevState !== newState) {
+      addVisionEvent(`state_transition: ${prevState} -> ${newState} (${reason})`);
+      visionStateRef.current = newState;
+    }
+  };
 
   // Utterance generation counter — prevents stale onend/onerror from clearing state
   const utteranceGenRef = useRef<number>(0);
@@ -316,6 +337,37 @@ function MainApp() {
             body: formData,
           });
 
+          // Handle 429 rate limited response
+          if (resp.status === 429) {
+            const retryAfter = parseInt(resp.headers.get("Retry-After") || "5", 10);
+            setStatusMsg(`Rate limited, retry in ${retryAfter}s`);
+
+            // Log frame response: error
+            addVisionEvent(`frame_response: status=error reason=429 retry_after=${retryAfter}s state=${visionStateRef.current}`);
+
+            // Speak Vision limited once per episode
+            if (visionStateRef.current === "ok") {
+              setVisionState("degraded", "429_rate_limited");
+              addVisionEvent(`rate_limited_429: retry_after_${retryAfter}s`);
+              const limitedMsg = makeVisionLimitedMovingOnlyMessage(lang);
+              arbiterRef.current?.enqueue(limitedMsg);
+              addVisionEvent("vision_limited_spoken");
+            }
+
+            // Reschedule with Retry-After delay
+            if (isRunningRef.current) {
+              if (intervalIdRef.current) {
+                clearInterval(intervalIdRef.current);
+                intervalIdRef.current = null;
+              }
+              if (tier2BackoffTimeoutRef.current) {
+                clearTimeout(tier2BackoffTimeoutRef.current);
+              }
+              tier2BackoffTimeoutRef.current = window.setTimeout(captureAndSendFrame, retryAfter * 1000);
+            }
+            return;
+          }
+
           if (!resp.ok) {
             throw new Error(`HTTP ${resp.status}`);
           }
@@ -337,6 +389,16 @@ function MainApp() {
             jpegKb: currentJpegKb,
           };
           setDurations(currentDurations);
+
+          // Handle suggested_interval_ms from server (spend throttle at $90)
+          if (data.usage?.suggested_interval_ms) {
+            const newInterval = data.usage.suggested_interval_ms;
+            if (isRunningRef.current && intervalIdRef.current) {
+              clearInterval(intervalIdRef.current);
+              intervalIdRef.current = window.setInterval(captureAndSendFrame, newInterval);
+              setStatusMsg(`Capture interval adjusted to ${newInterval}ms`);
+            }
+          }
 
           const ageSec = Date.now() / 1000 - data.client_timestamp;
 
@@ -365,41 +427,71 @@ function MainApp() {
           setSessionCost((prev) => +(prev + cost).toFixed(6));
           setStatusMsg("Active");
 
-          // Requirement D9: Vision watchdog recovery from degraded mode
-          if (isVisionDegradedRef.current) {
-            isVisionDegradedRef.current = false;
+          // Log frame response: ok (will update if degraded/error below)
+          addVisionEvent(`frame_response: status=ok reason=none state=${visionStateRef.current}`);
+
+          // Vision watchdog state machine
+          const currentState = visionStateRef.current;
+          const isDegradedResponse = data.perception?.status === "degraded";
+          const isVisionLimitedInstruction = data.perception?.instruction?.includes("Vision limited");
+
+          if (isDegradedResponse) {
+            // Server-side degraded response (circuit_open, spend_blocked, etc.)
+            const reason = data.perception?.reason ?? "unknown";
+            addVisionEvent(`frame_response: status=degraded reason=${reason} state=${currentState}`);
+            if (currentState === "ok") {
+              setVisionState("degraded", `server_degraded:${reason}`);
+              addVisionEvent(`degraded_received: ${reason}`);
+              const limitedMsg = makeVisionLimitedMovingOnlyMessage(lang);
+              arbiterRef.current?.enqueue(limitedMsg);
+              addVisionEvent("vision_limited_spoken");
+            }
+            return;
+          }
+
+          if (isVisionLimitedInstruction) {
+            // Server returns "Vision limited" instruction (spend throttle, etc.)
+            addVisionEvent(`frame_response: status=degraded reason=vision_limited_instruction state=${currentState}`);
+            if (currentState === "ok") {
+              setVisionState("degraded", "server_vision_limited");
+              addVisionEvent("server_vision_limited");
+              const visionLimitedMsg = makeVisionLimitedMovingOnlyMessage(lang);
+              arbiterRef.current?.enqueue(visionLimitedMsg);
+              addVisionEvent("vision_limited_spoken");
+            }
+            return;
+          }
+
+          // Valid non-degraded response received
+          if (currentState === "degraded") {
+            // Transition: degraded -> recovering -> ok
+            setVisionState("recovering", "valid_response_after_degraded");
             consecutiveFailuresRef.current = 0;
             if (tier2BackoffTimeoutRef.current) {
               clearTimeout(tier2BackoffTimeoutRef.current);
               tier2BackoffTimeoutRef.current = null;
             }
 
-            // Announce "Vision back" (debounced: not more than once per 10s)
-            const now = Date.now();
-            if (now - lastVisionBackRef.current > 10000) {
-              lastVisionBackRef.current = now;
-              const backMsg = makeVisionBackMessage(lang);
-              arbiterRef.current?.enqueue(backMsg);
-            }
+            // Speak "Vision back" immediately (no 10s debounce) via arbiter
+            // Recovery messages are prioritized in queue sorting and bypass rate limits/dedupe
+            // Pass clipKey/clipType undefined to skip async manifest loading race with hazard
+            addVisionEvent(`vision_back_decision: recovered_from_degraded`);
+            const backMsg = makeVisionBackMessage(lang);
+            arbiterRef.current?.enqueue({ ...backMsg, isRecovery: true, clipKey: undefined, clipType: undefined });
+            addVisionEvent("vision_back_spoken");
 
-            // Resume normal 2000ms cadence
+            // Transition to ok after speaking
+            setVisionState("ok", "vision_back_spoken");
+
+            // Resume normal 2000ms cadence (or suggested_interval_ms if set)
+            const interval = data.usage?.suggested_interval_ms ?? 2000;
             if (isRunningRef.current && !intervalIdRef.current) {
-              intervalIdRef.current = window.setInterval(captureAndSendFrame, 2000);
+              intervalIdRef.current = window.setInterval(captureAndSendFrame, interval);
             }
-          } else {
+          } else if (currentState === "ok") {
             consecutiveFailuresRef.current = 0;
           }
-
-          // Announce Vision limited if 3 consecutive failures reached
-          if (data.perception?.instruction === "Vision limited") {
-            const visionLimitedMsg = makeAdvisoryMessage(
-              lang === "hi" ? "दृष्टि सीमित" : "Vision limited",
-              lang,
-              "vision_limited"
-            );
-            arbiterRef.current?.enqueue(visionLimitedMsg);
-            return;
-          }
+          // If currentState === "recovering", stay in recovering until vision_back_spoken
 
           // Extract single most urgent hazard
           const urgentHazard =
@@ -490,11 +582,16 @@ function MainApp() {
             backoffSchedule[Math.min(consecutiveFailuresRef.current - 1, backoffSchedule.length - 1)] ?? 15000;
           setStatusMsg(`Request error (${consecutiveFailuresRef.current}): retrying in ${backoffDelay / 1000}s`);
 
-          // Speak ONE "Vision limited, moving-object alerts only" message (not repeated status churn)
-          if (!isVisionDegradedRef.current) {
-            isVisionDegradedRef.current = true;
+          // Log frame response: network error
+          addVisionEvent(`frame_response: status=error reason=network_failure consecutive=${consecutiveFailuresRef.current} backoff=${backoffDelay}ms state=${visionStateRef.current}`);
+
+          // Speak "Vision limited, moving-object alerts only" after 2 consecutive failures OR 4s with no response
+          if (visionStateRef.current === "ok" && (consecutiveFailuresRef.current >= 2 || backoffDelay >= 4000)) {
+            setVisionState("degraded", `network_failure_${consecutiveFailuresRef.current}`);
+            addVisionEvent(`network_failure_${consecutiveFailuresRef.current}: backoff_${backoffDelay}ms`);
             const limitedMsg = makeVisionLimitedMovingOnlyMessage(lang);
             arbiterRef.current?.enqueue(limitedMsg);
+            addVisionEvent("vision_limited_spoken");
           }
 
           // Reschedule next attempt with exponential backoff delay
@@ -693,7 +790,7 @@ function MainApp() {
     arbiterRef.current = null;
     // Reset vision watchdog state
     consecutiveFailuresRef.current = 0;
-    isVisionDegradedRef.current = false;
+    visionStateRef.current = "ok";
     lastVisionBackRef.current = 0;
     setIsRunning(false);
     setStatusMsg("Stopped");
@@ -995,6 +1092,64 @@ function MainApp() {
               Model Load: <strong>{tier1Metrics.loadTimeMs} ms</strong>
             </div>
           </div>
+          {tier1Metrics.status === "error" && tier1Metrics.errorMessage && (
+            <div style={{ marginTop: "0.5rem", padding: "0.5rem", background: "#7f1d1d", borderRadius: "4px", fontSize: "0.7rem", color: "#fecaca" }}>
+              <div><strong>Error:</strong> {tier1Metrics.errorMessage}</div>
+              {tier1Metrics.errorUrl && <div><strong>URL:</strong> {tier1Metrics.errorUrl}</div>}
+              {tier1Metrics.errorStatus !== undefined && <div><strong>Status:</strong> {tier1Metrics.errorStatus}</div>}
+              {tier1Metrics.errorDetail && <div><strong>Detail:</strong> {tier1Metrics.errorDetail}</div>}
+            </div>
+          )}
+        </div>
+
+        {/* Vision Status Event Log */}
+        <div style={{ marginTop: "0.8rem", borderTop: "1px solid #27272a", paddingTop: "0.6rem" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.3rem" }}>
+            <div style={{ fontWeight: "bold", color: "#4ade80" }}>Vision Status Events:</div>
+            <button
+              onClick={() => {
+                const logText = visionEventLog
+                  .slice()
+                  .reverse()
+                  .map((e) => `[${new Date(e.time).toLocaleTimeString()}] ${e.event}`)
+                  .join("\n");
+                navigator.clipboard.writeText(logText);
+              }}
+              style={{
+                fontSize: "0.65rem",
+                padding: "0.15rem 0.4rem",
+                background: "#27272a",
+                color: "#e4e4e7",
+                border: "1px solid #3f3f46",
+                borderRadius: "4px",
+                cursor: "pointer",
+              }}
+            >
+              Copy log
+            </button>
+          </div>
+          <div style={{ maxHeight: "150px", overflowY: "auto", fontSize: "0.7rem", fontFamily: "monospace" }}>
+            {visionEventLog.length === 0 ? (
+              <div style={{ color: "#71717a" }}>No events yet</div>
+            ) : (
+              visionEventLog
+                .slice()
+                .reverse()
+                .map((entry, idx) => (
+                  <div
+                    key={idx}
+                    style={{
+                      padding: "0.2rem 0",
+                      borderBottom: "1px solid #27272a",
+                      color: entry.event.includes("vision_back") ? "#4ade80" : entry.event.includes("vision_limited") ? "#f87171" : "#e4e4e7",
+                    }}
+                  >
+                    <span style={{ color: "#71717a" }}>[{new Date(entry.time).toLocaleTimeString()}]</span>{" "}
+                    <strong>{entry.event}</strong>
+                  </div>
+                ))
+            )}
+          </div>
         </div>
         <div style={{ marginTop: "0.6rem", borderTop: "1px solid #27272a", paddingTop: "0.4rem" }}>
           Last Spoken (phrase table): <strong style={{ color: "#f43f5e" }}>"{lastSpoken}"</strong>
@@ -1017,6 +1172,13 @@ function DemoPage() {
   const [queue, setQueue] = useState<string[]>([]);
   const [speaking, setSpeaking] = useState<string | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
+  // Vision status event log (same as MainApp)
+  const [visionEventLog, setVisionEventLog] = useState<Array<{ time: number; event: string; reason: string }>>([]);
+  const addVisionEvent = (event: string) => {
+    const now = Date.now();
+    const reason = event.match(/(?:reason[=:]|\()([^ )]+)/)?.[1] ?? "—";
+    setVisionEventLog((prev) => [...prev, { time: now, event, reason }].slice(-20));
+  };
   const arbiterRef = useRef<PriorityArbiter | null>(null);
   const hiVoiceRef = useRef<SpeechSynthesisVoice | null>(null);
   const enVoiceRef = useRef<SpeechSynthesisVoice | null>(null);
@@ -1169,11 +1331,26 @@ function DemoPage() {
   // Counter for unique P1 keys (avoids 4s dedupe on repeated taps)
   const p1TapCounterRef = useRef<number>(0);
 
+  // Utterance ID counter for event log
+  const utteranceIdRef = useRef<number>(0);
+
   useEffect(() => {
     arbiterRef.current = new PriorityArbiter(speakFn, cancelFn, {
       onDecision: (decision, msg) => {
         const reason = "reason" in decision ? decision.reason : "unknown";
         addLog(`arbiter: ${decision.type}:${reason} key=${msg?.key ?? "?"} queue=${arbiterRef.current?.["queue"]?.length ?? 0}`);
+        // Log to vision event log with utterance ID and text
+        const utteranceId = ++utteranceIdRef.current;
+        const eventText = msg?.text ?? "?";
+        if (decision.type === "spoken") {
+          addVisionEvent(`utterance_spoken: id=${utteranceId} reason=${reason} key=${msg?.key ?? "?"} text="${eventText}"`);
+        } else if (decision.type === "interrupt") {
+          addVisionEvent(`utterance_cancelled: id=${utteranceId} reason=${reason} key=${msg?.key ?? "?"} text="${eventText}"`);
+        } else if (decision.type === "deferred") {
+          addVisionEvent(`utterance_deferred: id=${utteranceId} reason=${reason} key=${msg?.key ?? "?"} text="${eventText}"`);
+        } else if (decision.type === "dropped") {
+          addVisionEvent(`utterance_dropped: id=${utteranceId} reason=${reason} key=${msg?.key ?? "?"} text="${eventText}"`);
+        }
       },
     });
     return () => {
@@ -1444,6 +1621,67 @@ function DemoPage() {
               </ul>
             )}
           </div>
+        </div>
+      </section>
+
+      {/* Vision Status Event Log */}
+      <section
+        style={{
+          width: "100%",
+          maxWidth: "640px",
+          background: "#18181b",
+          border: "1px solid #27272a",
+          borderRadius: "8px",
+          padding: "1rem",
+          boxSizing: "border-box",
+          marginBottom: "1rem",
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.3rem" }}>
+          <div style={{ fontWeight: "bold", color: "#4ade80" }}>Vision Status Events:</div>
+          <button
+            onClick={() => {
+              const logText = visionEventLog
+                .slice()
+                .reverse()
+                .map((e) => `[${new Date(e.time).toLocaleTimeString()}] ${e.event} (reason: ${e.reason})`)
+                .join("\n");
+              navigator.clipboard.writeText(logText);
+            }}
+            style={{
+              fontSize: "0.65rem",
+              padding: "0.15rem 0.4rem",
+              background: "#27272a",
+              color: "#e4e4e7",
+              border: "1px solid #3f3f46",
+              borderRadius: "4px",
+              cursor: "pointer",
+            }}
+          >
+            Copy log
+          </button>
+        </div>
+        <div style={{ maxHeight: "150px", overflowY: "auto", fontSize: "0.7rem", fontFamily: "monospace" }}>
+          {visionEventLog.length === 0 ? (
+            <div style={{ color: "#71717a" }}>No events yet</div>
+          ) : (
+            visionEventLog
+              .slice()
+              .reverse()
+              .map((entry, idx) => (
+                <div
+                  key={idx}
+                  style={{
+                    padding: "0.2rem 0",
+                    borderBottom: "1px solid #27272a",
+                    color: entry.event.includes("vision_back") ? "#4ade80" : entry.event.includes("vision_limited") ? "#f87171" : "#e4e4e7",
+                  }}
+                >
+                  <span style={{ color: "#71717a" }}>[{new Date(entry.time).toLocaleTimeString()}]</span>{" "}
+                  <strong>{entry.event}</strong> <span style={{ color: "#71717a" }}>(reason: {entry.reason})</span>
+                </div>
+              ))
+          )}
         </div>
       </section>
 

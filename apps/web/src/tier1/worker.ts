@@ -97,9 +97,30 @@ async function initializeModel(modelUrl = "/models/coco-ssd/model.json") {
       loadTimeMs: modelLoadTimeMs,
     });
   } catch (loadErr) {
+    const errMsg = String(loadErr);
+    const url = "/models/coco-ssd/model.json";
+    let status: number | undefined;
+    const message = errMsg;
+
+    // Try to extract URL and HTTP status from the error
+    if (errMsg.includes("404") || errMsg.includes("Not Found")) {
+      status = 404;
+    } else if (errMsg.includes("403") || errMsg.includes("Forbidden")) {
+      status = 403;
+    } else if (errMsg.includes("500") || errMsg.includes("Internal Server")) {
+      status = 500;
+    } else if (errMsg.includes("503") || errMsg.includes("Service Unavailable")) {
+      status = 503;
+    } else if (errMsg.includes("fetch") || errMsg.includes("network") || errMsg.includes("NetworkError")) {
+      status = 0; // Network error
+    }
+
     self.postMessage({
       type: "error",
-      error: `Model load failed: ${String(loadErr)}`,
+      error: `Model load failed: ${errMsg}`,
+      url,
+      status,
+      message,
     });
   } finally {
     isInitializing = false;

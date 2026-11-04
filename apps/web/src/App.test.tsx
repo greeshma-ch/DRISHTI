@@ -51,22 +51,22 @@ describe("App", () => {
         buildPhrase({ type: "chair", direction: "center", clear_side: "left" }, "en")
       ).toBe("Chair ahead, step left");
 
-      // chair center, clear_side none
+      // chair center, clear_side none -> now says "stop" for static center hazards
       expect(
         buildPhrase({ type: "chair", direction: "center", clear_side: "none" }, "hi")
-      ).toBe("कुर्सी आगे");
+      ).toBe("कुर्सी आगे, रुकें");
       expect(
         buildPhrase({ type: "chair", direction: "center", clear_side: "none" }, "en")
-      ).toBe("Chair ahead");
+      ).toBe("Chair ahead, stop");
     });
 
     it("handles other with a label (speaks label ahead)", () => {
       expect(
         buildPhrase({ type: "other", direction: "center", label: "कार्ट" }, "hi")
-      ).toBe("कार्ट आगे");
+      ).toBe("कार्ट आगे, रुकें");
       expect(
         buildPhrase({ type: "other", direction: "center", label: "cart" }, "en")
-      ).toBe("cart ahead");
+      ).toBe("cart ahead, stop");
 
       // With clear_side
       expect(
@@ -86,10 +86,10 @@ describe("App", () => {
     it("handles other without a label (falls back to generic hazard word)", () => {
       expect(
         buildPhrase({ type: "other", direction: "center", label: null }, "hi")
-      ).toBe("खतरा आगे");
+      ).toBe("खतरा आगे, रुकें");
       expect(
         buildPhrase({ type: "other", direction: "center", label: null }, "en")
-      ).toBe("Hazard ahead");
+      ).toBe("Hazard ahead, stop");
 
       // With clear_side
       expect(

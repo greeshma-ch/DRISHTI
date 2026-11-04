@@ -38,6 +38,7 @@
     "side": { "en": "careful", "hi": "सावधान" }
   },
   "avoid_actions": {
+    "none": { "en": "stop", "hi": "रुकें" },
     "right": { "en": "step right", "hi": "दाएँ हटें" },
     "left": { "en": "step left", "hi": "बाएँ हटें" }
   },

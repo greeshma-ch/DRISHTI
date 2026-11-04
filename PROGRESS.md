@@ -26,7 +26,7 @@ emergency flow, personalization (Hindi and English, tone, verbosity, steps), eva
 | Date | Prompts | Goal | Status |
 |---|---|---|---|
 | Oct 29 (today) | Setup, P0, P1, P2 | Bootstrap, walking skeleton (camera -> server -> Meta -> speech), arbiter v1 & phrase table | [x] P0, P1 done |
-| Oct 30 | P3, P4 | P3: Tier 1 on-device detector; P4: Tier 2 hardening, rate limiter, spend guard | [x] P3 done |
+| Oct 30 | P3, P4 | P3: Tier 1 on-device detector; P4: Tier 2 hardening, rate limiter, spend guard | [x] P3, P4 done |
 | Oct 31 | P5, P6 | P5: Navigation; P6: Emergency flow, profile & onboarding, "what's nearby" | [ ] |
 | Nov 1 | P7 | Evaluation harness. Gate: walk outdoors with live alerts; SAM decision | [ ] |
 | Nov 2 | P8, P9a | Reliability hardening, soak test, memory & semantic search (if gate passed) | [ ] |
@@ -80,35 +80,85 @@ Throttle levels are defined in AGENTS.md (warn $60, throttle $90, block dev call
 
 ## Current session
 
-- Working on: Tier 1 Android Phone Stall Recovery & Decision Labeling (COMPLETED)
+- Working on: P4 Tier 2 Hardening, Circuit Breaker, Rate Limiter, Spend Guard (COMPLETED)
 - Done this session:
-  - **Stall Recovery & Hardware Downscale (Item 1)**:
-    - Implemented automatic stall recovery in `VideoClipSampler`: on `waiting`, `stalled`, or unexpected `pause` (browser/codec starvation), pauses sampler, waits for `canplay` (timeout 2s), calls `play()`, increments `recoveryCount`, and continues playback seamlessly.
-    - Telemetry HUD displays live count: `"recovered N times"` and active recovery indicator.
-    - Abort safety: aborts only after 3 consecutive failed recovery attempts or 8 s without progress (`Date.now() - lastProgressTimestamp >= 8000`).
-    - Fixed memory exhaustion on mobile Chrome by capturing frames with `createImageBitmap(source, { resizeWidth: targetWidth, resizeHeight: targetHeight, resizeQuality: "low" })` (where `targetWidth <= 320`), avoiding full-resolution (e.g. 1080p) bitmap copies in memory.
-    - Added high-resolution warning banner in `Tier1ReviewPage` for clips wider than 854 px with one-click copyable ffmpeg downscale command: `ffmpeg -i input.mp4 -vf "scale=854:-2" -c:v libx264 -pix_fmt yuv420p -c:a copy output_480p.mp4`.
-  - **Decision Labeling & Ground Truth Metrics (Item 2)**:
-    - Every row in the Tracked Object Decisions Log now has ground truth labeling buttons:
-      - `"alerted"` rows: `"True alert"` and `"False alert"`
-      - `suppressed` rows: `"Correct silence"` and `"Should have alerted"`
-      - Current label displayed on each row as a distinct colored badge (`True alert` green, `False alert` red, `Correct silence` blue, `Should have alerted` amber, `Unlabeled` muted).
-    - Bulk action: `"✓ Mark all unlabeled as correct"` button automatically labels all unlabeled alerted rows as `"True alert"`, suppressed rows as `"Correct silence"`, and missed rows as `"Should have alerted"`.
-    - `"+ Mark Missed"` button and modal records current playback time with hazard type and direction picker, producing a row with `label = "Should have alerted"`.
-    - Added live Ground Truth Summary Metrics panel displaying:
-      - True Alerts ($TP$), False Alerts ($FP$), Correct Silences ($TN$), Missed Hazards ($FN$)
-      - Alerts / Min ($totalAlerts / (clipDurationSec / 60)$)
-      - Precision ($TP / (TP + FP)$) and Recall ($TP / (TP + FN)$) with zero-denominator safety (`"N/A"`)
-      - Unlabeled count
-    - `formatDecisionsToCsv` includes the `label` column containing all assigned ground truth labels.
+  - **Circuit Breaker** (`server/circuit_breaker.py`):
+    - Module-level state with asyncio.Lock (single-worker assumption documented)
+    - 3-failure threshold, 30s open duration, 8s timeout per attempt
+    - Tracks: timeouts, connection errors, Meta 5xx, Meta 429
+    - Valid empty-hazard response = success (resets failure count)
+    - Half-open after 30s: one test call, success closes, failure reopens
+    - Returns degraded result (`status=degraded, reason=circuit_open`) when open
+    - Closes coroutine when circuit open to avoid "never awaited" warnings
+  - **Token Bucket Rate Limiter** (`server/rate_limiter.py`):
+    - stdlib sqlite3 with WAL mode, persists to `eval/rate_limits.sqlite`
+    - Per-user (X-User-Id header, fallback to client IP) and per-endpoint buckets
+    - Endpoints: frame (1.2/s, burst 3), chat (10/min, burst 10), geocode (1/s global, burst 1)
+    - Exempt: /health, /status, /spend, /emergency/*
+    - Returns 429 with Retry-After header (seconds)
+    - Prunes rows older than 24h at startup
+    - SQLite persistence across restarts
+  - **Spend Guard** (`server/meta_client.py`, `server/app.py`):
+    - In-memory running total loaded from `eval/spend.jsonl` at startup (survives restarts)
+    - Throttle levels: <$60 normal, $60-90 warn, $90-120 throttle, >$120 blocked
+    - At $90: `/frame` includes `suggested_interval_ms=4000`
+    - At $120: blocks non-FINAL_RUN calls, returns degraded (`reason=spend_blocked`)
+    - `FINAL_RUN=True` bypasses spend block
+    - `/spend` endpoint returns level, total_usd, prices_used dict
+  - **Hedged Wording** (`server/phrases.py`):
+    - Confidence < 0.6: prefixes "possible " / "संभावित " (EN/HI)
+    - Never adds "possible" to Stop phrases (e.g., "Vehicle ahead, stop" unchanged)
+    - Phrase length ≤ 4 words (truncated after prefix)
+  - **Server Integration** (`server/app.py`, `server/meta_client.py`, `server/config.py`):
+    - P4 settings added: circuit breaker, rate limiter, spend thresholds, confidence threshold
+    - `/frame` endpoint: rate limiter check at start, spend guard, circuit breaker integration
+    - Degraded result format: `status=degraded` with `reason` (circuit_open|spend_blocked|rate_limited)
+  - **Fault Injection Tests** (`server/tests/test_fault_injection.py`):
+    - 14 tests covering 10 failure modes + circuit breaker state + FINAL_RUN bypass
+    - Each test mocks Meta API failure and verifies expected spoken message exactly once
+    - Meta 500, timeout, 429, malformed JSON, connection error → "Vision limited..." after 3 failures
+    - Circuit open → degraded immediately, client handles Retry-After, speaks once
+    - Spend >$120 → blocked, degraded result
+    - Valid empty hazard → silence (Hard Rule 1)
+    - Valid hazard → phrase spoken (confidence ≥0.6 normal, <0.6 hedged)
+  - **Unit Tests**:
+    - `test_circuit_breaker.py`: 8 tests (open/close/half-open, success resets, concurrent safety)
+    - `test_rate_limiter.py`: 10 tests (burst/sustained, persistence, prune, exempt endpoints)
+    - `test_spend_guard.py`: 7 tests (levels, startup loading, restart survival, suggested_interval_ms)
+    - `test_hedged_wording.py`: 9 tests (EN/HI hedging, Stop exception, phrase length, parse integration)
+    - `test_fault_injection.py`: 14 tests (all 10 failure modes + CB state + FINAL_RUN)
+  - **Client Tests** (`apps/web/src/client_network_failure.test.tsx`):
+    - 6 tests: network failures, 429 handling, suggested_interval_ms, no duplication
+    - Network error/timeout → "Vision limited..." after 2 consecutive failures OR 4s backoff
+    - Recovery → "Vision back"
+  - **Scripted Breaker Demo** (`scripts/demo_breaker.py`):
+    - Demonstrates full CB lifecycle: CLOSED → 3 failures → OPEN → 30s → HALF-OPEN → success → CLOSED
+    - Verifies spoken messages: "Vision limited..." once, "Vision back" on recovery
   - **Testing & Verification**:
-    - `eval_stepper.test.ts`: 21 tests covering stall recovery on waiting/stalled/pause, recovery counting, 8s no-progress abort, 3 failed recoveries abort, >854px warning check, label state transitions, bulk labeling, summary math, edge cases, and CSV export.
-    - `vitest run`: 121 tests passed across all 8 test files in `apps/web`.
-    - `tsc --noEmit`: 0 errors.
-    - `eslint`: 0 errors.
-    - `vite build`: built cleanly in 9.04s.
-    - `pytest server/tests`: 28 passed in 0.84s.
-- Next: P4 Tier 2 hardening, rate limiter, spend guard.
+    - `pytest server/tests/`: 74 passed
+    - `vitest run`: 127 passed
+    - `tsc --noEmit`: clean
+    - `eslint`: clean (pre-existing warnings only)
+  - **Vision recovery follow-up (Nov 3)**:
+    - Recovery TTS bypasses async audio-manifest loading to prevent a same-frame hazard clip request from canceling “Vision back”.
+    - Updated center-static stop phrase expectations and cleaned TypeScript diagnostics in recovery tests.
+    - Verified: `pytest server/tests/` — 74 passed; `vitest run` — 136 passed; `tsc --noEmit` — clean.
+- **Vision recovery fix (Nov 4)**:
+    - Root cause identified: arbiter's P1 queue sorted by urgency desc, so a co-enqueued hazard (urgency 3) preempted “Vision back” (urgency 0) in the same recovery frame.
+    - Fixes applied:
+      1. Added `isRecovery` flag to `ArbiterMessage` and `recovery_interrupts_status` decision reason.
+      2. Recovery messages now speak immediately (`recovery_immediate`), bypassing dedupe/rate-limit, and interrupt any active P1 status.
+      3. Queue sorting prioritizes recovery over hazards when both are P1.
+      4. Removed `ttsOnly` bypass; recovery messages pass `clipKey: undefined, clipType: undefined` to skip manifest loading.
+      5. Phrase table updated: `avoid_actions.none = { en: “stop”, hi: “रुकें” }` for center static hazards (Rule 8 clarified: “stop” allowed for static obstacles).
+    - Verified: `pytest server/tests/` — 74 passed; `vitest run` — 136 passed; `tsc --noEmit` — clean; ESLint 0 errors.
+- **Test hardening & Vision status UI (Nov 4)**:
+    - Fixed failing DemoPage integration test (P3/P1 interrupt cycle) by adding proper cleanup of P1 utterance onend.
+    - Fixed all TypeScript errors: made `processQueueForTest()` public on `PriorityArbiter` for test access; added non-null assertions where length checks guarantee presence; fixed Worker mock typing.
+    - Rendered Vision Status event log on **both** MainApp and DemoPage under a “Vision Status Events” heading with timestamp, event, and reason columns; added “Copy log” button.
+    - Recovery policy tests pass: hazard first, then “Vision back” exactly once; no hazard means “Vision back” speaks immediately.
+    - Verified: `npm test` — 138 passed; `tsc --noEmit` — clean; `pytest server/tests/` — 74 passed.
+- Next: P5 Navigation, P6 Emergency flow, profile & onboarding
 - Blockers: None
 
 ## Open issues and risks

@@ -126,6 +126,9 @@ describe("PriorityArbiter", () => {
       arbiter.enqueue(msg1);
       expect(speakFn).toHaveBeenCalledTimes(1);
 
+      // Simulate speech ending
+      arbiter.onSpeechEnd();
+
       // Manually set all tracking fields to 5 seconds ago to simulate time passing
       const fiveSecondsAgo = Date.now() - 5000;
       (arbiter as any).lastSpokenAtByP1Key.set("hazard:pole:left", fiveSecondsAgo);
@@ -167,6 +170,9 @@ describe("PriorityArbiter", () => {
       const msg1 = makeHazardMessage("pole", "left", "Pole left, step right", "en", 2, 0.9);
       arbiter.enqueue(msg1);
       expect(speakFn).toHaveBeenCalledTimes(1);
+
+      // Simulate speech ending
+      arbiter.onSpeechEnd();
 
       // Manually set lastHazardSpokenAt to 2 seconds ago
       // Also update lastSpokenAt and lastSpokenPriority so processQueue rate limit check passes
@@ -233,7 +239,14 @@ describe("PriorityArbiter", () => {
   });
 
   describe("queue processing order", () => {
-    it("processes higher priority first", () => {
+    it("processes higher priority first when queued", () => {
+      // First, start speaking a P3 so subsequent enqueues get queued
+      const p3Speaking = makeAdvisoryMessage("Speaking", "en", "speaking");
+      arbiter.enqueue(p3Speaking);
+      expect(speakFn).toHaveBeenCalledTimes(1);
+      expect(speakFn).toHaveBeenCalledWith("Speaking", "en", "adv:speaking", undefined, undefined, undefined);
+
+      // Now enqueue P3, P2, P1 while P3 is speaking - they should be queued
       const p3 = makeAdvisoryMessage("Advisory", "en", "adv1");
       const p2 = makeNavMessage("Navigation", "en", "nav1");
       const p1 = makeHazardMessage("pole", "left", "Hazard", "en", 2, 0.9);
@@ -242,7 +255,14 @@ describe("PriorityArbiter", () => {
       arbiter.enqueue(p2);
       arbiter.enqueue(p1);
 
-      // P1 should speak first
+      // Still only 1 call (the initial P3)
+      expect(speakFn).toHaveBeenCalledTimes(1);
+
+      // Simulate P3 speech ending
+      arbiter.onSpeechEnd();
+
+      // Now processQueue - P1 hazard should be spoken first (highest priority)
+      expect(speakFn).toHaveBeenCalledTimes(2);
       expect(speakFn).toHaveBeenCalledWith("Hazard", "en", "hazard:pole:left", undefined, "pole:left:none", "hazards");
     });
 
@@ -421,7 +441,7 @@ describe("Status message interrupt", () => {
     vi.useRealTimers();
   });
 
-  it("status message interrupts P2 immediately", () => {
+  it("status message does NOT interrupt P2 immediately - waits for P2 to finish", () => {
     const navMsg = makeNavMessage("Turn left", "en", "turn1");
     arbiter.enqueue(navMsg);
     arbiter.onSpeechStart(2);
@@ -429,8 +449,16 @@ describe("Status message interrupt", () => {
     const statusMsg = makeVisionPausedMessage("en");
     arbiter.enqueue(statusMsg);
 
-    // Should interrupt P2 immediately (normal P1 behavior)
-    expect(cancelFn).toHaveBeenCalled();
+    // Should NOT interrupt P2 - status messages wait
+    expect(cancelFn).not.toHaveBeenCalled();
+    expect(speakFn).toHaveBeenCalledTimes(1); // Only the nav message
+
+    // Simulate nav speech ending
+    arbiter.onSpeechEnd();
+
+    // Now status message should be spoken
+    expect(speakFn).toHaveBeenCalledTimes(2);
+    expect(speakFn).toHaveBeenLastCalledWith("Vision paused", "en", "status:vision_paused", undefined, "vision_paused", "system");
   });
 
   it("status message dedupes with same key", () => {
@@ -442,6 +470,55 @@ describe("Status message interrupt", () => {
     const msg2 = makeVisionPausedMessage("en");
     arbiter.enqueue(msg2);
     expect(speakFn).toHaveBeenCalledTimes(1);
+  });
+
+  it("recovery status message speaks immediately, bypassing dedupe and rate limit", () => {
+    const recoveryMsg = makeVisionBackMessage("en");
+    (recoveryMsg as any).isRecovery = true;
+    recoveryMsg.clipKey = undefined;
+    recoveryMsg.clipType = undefined;
+
+    arbiter.enqueue(recoveryMsg);
+    expect(speakFn).toHaveBeenCalledWith("Vision back", "en", "status:vision_back", undefined, undefined, undefined);
+  });
+
+  it("recovery status message speaks even when hazard is queued after", () => {
+    // Enqueue recovery first
+    const recoveryMsg = makeVisionBackMessage("en");
+    (recoveryMsg as any).isRecovery = true;
+    recoveryMsg.clipKey = undefined;
+    recoveryMsg.clipType = undefined;
+    arbiter.enqueue(recoveryMsg);
+    expect(speakFn).toHaveBeenCalledTimes(1);
+    expect(speakFn).toHaveBeenCalledWith("Vision back", "en", "status:vision_back", undefined, undefined, undefined);
+    speakFn.mockClear();
+
+    // Simulate recovery speech ending
+    arbiter.onSpeechEnd();
+
+    // Then enqueue a hazard (urgency 3)
+    const hazardMsg = makeHazardMessage("vehicle", "center", "Vehicle ahead, stop", "en", 3, 0.9);
+    arbiter.enqueue(hazardMsg);
+
+    // Hazard should also be spoken (after recovery finishes)
+    expect(speakFn).toHaveBeenCalledWith("Vehicle ahead, stop", "en", "hazard:vehicle:center", undefined, "vehicle:center:none", "hazards");
+  });
+
+  it("recovery status message is not deduped", () => {
+    const recoveryMsg = makeVisionBackMessage("en");
+    (recoveryMsg as any).isRecovery = true;
+
+    arbiter.enqueue(recoveryMsg);
+    expect(speakFn).toHaveBeenCalledTimes(1);
+
+    // Simulate first recovery speech ending
+    arbiter.onSpeechEnd();
+
+    // Enqueue again immediately - should speak again (no dedupe for recovery)
+    const recoveryMsg2 = makeVisionBackMessage("en");
+    (recoveryMsg2 as any).isRecovery = true;
+    arbiter.enqueue(recoveryMsg2);
+    expect(speakFn).toHaveBeenCalledTimes(2);
   });
 });
 

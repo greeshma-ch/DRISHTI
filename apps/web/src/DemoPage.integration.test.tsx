@@ -331,6 +331,11 @@ describe("DemoPage integration", () => {
       // Verify arbiter is still in correct state by checking P1 utterance exists
       const p1Utterance = mockSpeechSynthesis.speak.mock.calls[mockSpeechSynthesis.speak.mock.calls.length - 1]?.[0]!;
       expect(p1Utterance?.text).toMatch(/Vehicle|गाड़ी/);
+      if (p1Utterance.onend) {
+        await act(async () => {
+          p1Utterance.onend!();
+        });
+      }
 
       // Advance fake time by 5 seconds to bypass 4s hazard dedupe window for next cycle
       vi.setSystemTime(Date.now() + 5000);
