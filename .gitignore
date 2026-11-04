@@ -38,7 +38,7 @@ test-results/
 # Model and tool caches
 .cache/
 /models/
-!apps/web/public/models/
+
 
 # Logs and OS files
 *.log
