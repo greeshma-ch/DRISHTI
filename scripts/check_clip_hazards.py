@@ -234,16 +234,16 @@ async def check_labeled_misses(csv_path: Path, endpoint: str, lang: str = "en") 
         return
 
     print(
-        f"{'Clip':<14} {'t (s)':<8} {'Expected':<18} {'Tier 2 Detections (t-1, t, t+1)':<32} "
-        f"{'Dist':<8} {'Urg':<5} {'Latency':<9} {'Retries':<8} {'Result'}"
+        f"{'Clip':<14} {'t (s)':<8} {'Expected':<18} {'Tier 2 Detections (t-1, t, t+1)':<38} "
+        f"{'Dist':<8} {'Urg':<5} {'Latency':<9} {'Retries':<8} {'Strict':<7} {'Loose'}"
     )
     print("-" * 115)
 
     type_stats: dict[str, dict[str, int]] = {
-        "stairs": {"total": 0, "hits": 0},
-        "wall": {"total": 0, "hits": 0},
-        "person": {"total": 0, "hits": 0},
-        "vehicle": {"total": 0, "hits": 0},
+        "stairs": {"total": 0, "strict_hits": 0, "loose_hits": 0},
+        "wall": {"total": 0, "strict_hits": 0, "loose_hits": 0},
+        "person": {"total": 0, "strict_hits": 0, "loose_hits": 0},
+        "vehicle": {"total": 0, "strict_hits": 0, "loose_hits": 0},
     }
 
     for idx, row in enumerate(missed_rows, start=1):
@@ -314,27 +314,39 @@ async def check_labeled_misses(csv_path: Path, endpoint: str, lang: str = "en") 
                     "error": str(err),
                 })
 
-        # Hit determination: same type within ±1.5s
-        hit_det: dict[str, Any] | None = None
+        # Hit determination:
+        # Strict hit: same semantic type within ±1.5s
+        strict_hit_det: dict[str, Any] | None = None
         for d in detections:
             if is_hazard_type_match(expected_type, d["type"]):
-                hit_det = d
+                strict_hit_det = d
                 break
 
-        is_hit = hit_det is not None
-        result_str = "HIT" if is_hit else "MISS"
+        # Loose hit: any hazard in the expected direction within ±1.5s
+        loose_hit_det: dict[str, Any] | None = None
+        for d in detections:
+            if d.get("type") not in ("--", "unknown", "none", "error") and d.get("direction") == expected_dir:
+                loose_hit_det = d
+                break
+
+        is_strict_hit = strict_hit_det is not None
+        is_loose_hit = loose_hit_det is not None or is_strict_hit
+
+        strict_str = "HIT" if is_strict_hit else "MISS"
+        loose_str = "HIT" if is_loose_hit else "MISS"
 
         # Best representative detection to display
-        rep_det = hit_det or (detections[1] if len(detections) > 1 else (detections[0] if detections else {}))
-        tier2_summary = ", ".join(f"t={d['ts']:.1f}:{d['type']}" for d in detections if d.get("type") not in ("--", "unknown")) or "none"
-        if len(tier2_summary) > 30:
-            tier2_summary = tier2_summary[:28] + ".."
+        rep_det = strict_hit_det or loose_hit_det or (detections[1] if len(detections) > 1 else (detections[0] if detections else {}))
+        tier2_summary = ", ".join(f"t={d['ts']:.1f}:{d['type']}({d.get('direction', '-')})" for d in detections if d.get("type") not in ("--", "unknown")) or "none"
+        if len(tier2_summary) > 36:
+            tier2_summary = tier2_summary[:34] + ".."
 
         exp_display = f"{expected_type} ({expected_dir})"
         print(
-            f"{clip_name:<14} {t_val:<8.2f} {exp_display:<18} {tier2_summary:<32} "
+            f"{clip_name:<14} {t_val:<8.2f} {exp_display:<18} {tier2_summary:<38} "
             f"{str(rep_det.get('distance', '--')):<8} {str(rep_det.get('urgency', '--')):<5} "
-            f"{str(rep_det.get('latency', '--')):<9} {str(rep_det.get('retries', '--')):<8} {result_str}"
+            f"{str(rep_det.get('latency', '--')):<9} {str(rep_det.get('retries', '--')):<8} "
+            f"{strict_str:<7} {loose_str}"
         )
 
         # Track category statistics
@@ -351,45 +363,55 @@ async def check_labeled_misses(csv_path: Path, endpoint: str, lang: str = "en") 
             cat = norm_type
 
         if cat not in type_stats:
-            type_stats[cat] = {"total": 0, "hits": 0}
+            type_stats[cat] = {"total": 0, "strict_hits": 0, "loose_hits": 0}
         type_stats[cat]["total"] += 1
-        if is_hit:
-            type_stats[cat]["hits"] += 1
+        if is_strict_hit:
+            type_stats[cat]["strict_hits"] += 1
+        if is_loose_hit:
+            type_stats[cat]["loose_hits"] += 1
 
     # Print summary table (Requirement 3)
-    print("=" * 65)
+    print("=" * 80)
     print("Tier 2 Recall by Hazard Type on Labeled Misses (Requirement 3)")
-    print("=" * 65)
-    print(f"{'Hazard Type':<16} {'Total Misses':<14} {'Hits':<10} {'Tier 2 Recall'}")
-    print("-" * 65)
+    print("=" * 80)
+    print(f"{'Hazard Type':<16} {'Total Misses':<14} {'Strict Hits':<13} {'Strict Recall':<15} {'Loose Hits':<12} {'Loose Recall'}")
+    print("-" * 80)
 
     grand_total = 0
-    grand_hits = 0
+    grand_strict = 0
+    grand_loose = 0
 
     for cat in ["stairs", "wall", "person", "vehicle"]:
-        stat = type_stats.get(cat, {"total": 0, "hits": 0})
+        stat = type_stats.get(cat, {"total": 0, "strict_hits": 0, "loose_hits": 0})
         total = stat["total"]
-        hits = stat["hits"]
-        recall_pct = f"{(hits / total * 100):.1f}%" if total > 0 else "N/A (0 samples)"
+        s_hits = stat.get("strict_hits", 0)
+        l_hits = stat.get("loose_hits", 0)
+        s_pct = f"{(s_hits / total * 100):.1f}%" if total > 0 else "N/A"
+        l_pct = f"{(l_hits / total * 100):.1f}%" if total > 0 else "N/A"
         grand_total += total
-        grand_hits += hits
-        print(f"{cat:<16} {total:<14} {hits:<10} {recall_pct}")
+        grand_strict += s_hits
+        grand_loose += l_hits
+        print(f"{cat:<16} {total:<14} {s_hits:<13} {s_pct:<15} {l_hits:<12} {l_pct}")
 
     # Other categories if any
     for cat, stat in type_stats.items():
         if cat in ("stairs", "wall", "person", "vehicle"):
             continue
         total = stat["total"]
-        hits = stat["hits"]
-        recall_pct = f"{(hits / total * 100):.1f}%" if total > 0 else "N/A"
+        s_hits = stat.get("strict_hits", 0)
+        l_hits = stat.get("loose_hits", 0)
+        s_pct = f"{(s_hits / total * 100):.1f}%" if total > 0 else "N/A"
+        l_pct = f"{(l_hits / total * 100):.1f}%" if total > 0 else "N/A"
         grand_total += total
-        grand_hits += hits
-        print(f"{cat:<16} {total:<14} {hits:<10} {recall_pct}")
+        grand_strict += s_hits
+        grand_loose += l_hits
+        print(f"{cat:<16} {total:<14} {s_hits:<13} {s_pct:<15} {l_hits:<12} {l_pct}")
 
-    print("-" * 65)
-    overall_recall = f"{(grand_hits / grand_total * 100):.1f}%" if grand_total > 0 else "N/A"
-    print(f"{'Overall':<16} {grand_total:<14} {grand_hits:<10} {overall_recall}")
-    print("=" * 65)
+    print("-" * 80)
+    overall_s = f"{(grand_strict / grand_total * 100):.1f}%" if grand_total > 0 else "N/A"
+    overall_l = f"{(grand_loose / grand_total * 100):.1f}%" if grand_total > 0 else "N/A"
+    print(f"{'Overall':<16} {grand_total:<14} {grand_strict:<13} {overall_s:<15} {grand_loose:<12} {overall_l}")
+    print("=" * 80)
 
 
 async def run_check(clip_path: Path | None, endpoint: str, lang: str = "en") -> None:

@@ -30,6 +30,8 @@ export interface TrackPoint {
   timestamp: number; // in seconds
   cx: number;
   cy: number;
+  h_frac?: number;
+  bbox?: BBox;
 }
 
 export interface TrackedObject {
@@ -132,6 +134,12 @@ export interface Tier1Config {
   minTrackDurationSec?: number; // tracked at least 0.8 s (time-based)
   minClosingDurationSec?: number; // closing sustained at least 0.6 s (time-based)
   staticMinTrackDurationSec?: number; // tracked at least 0.4 s for static obstacles
+  fastClosingTrackDurationSec?: number; // tracked at least 0.4 s (2 frames) for fast closing
+  fastClosingMinHFrac?: number; // min height fraction (default 0.40)
+  fastClosingDeltaHFrac?: number; // min delta height fraction between consecutive frames (default 0.15)
+  fastClosingGrowthRatePerSec?: number; // min growth rate per sec (default 0.20)
+  identityMaxHeightRatio?: number; // max height ratio between samples within 0.55s before rejecting match (default 3.0)
+  identityMaxAreaRatio?: number; // max area ratio between samples within 0.55s before rejecting match (default 9.0)
   perClassClosingThreshold: Record<string, number>;
   globalRateLimitMs: number; // 3000 ms global rate limit unless urgency 3
   inputSize?: 192 | 256 | 320; // default 320, 256 or 192 for slower phones

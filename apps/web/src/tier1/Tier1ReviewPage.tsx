@@ -40,13 +40,40 @@ interface LoggedAlert {
   label?: "True" | "False" | "Missed" | "";
 }
 
-export function Tier1ReviewPage({ onBack }: { onBack: () => void }): React.ReactElement {
-  const [videoSrc, setVideoSrc] = useState<string | null>(null);
-  const [loadedFileName, setLoadedFileName] = useState<string>("clip");
+interface ConsoleErrorEntry {
+  time: string;
+  message: string;
+}
+
+export interface Tier1ReviewPageProps {
+  onBack: () => void;
+  detector?: Tier1Detector;
+  initialVideoSrc?: string;
+  initialFileName?: string;
+  initialIsLoadedData?: boolean;
+  onMounted?: (controls: {
+    processFrame: (mediaTime: number) => Promise<void>;
+    runClipEvaluation: () => Promise<void>;
+  }) => void;
+}
+
+export function Tier1ReviewPage({
+  onBack,
+  detector: customDetector,
+  initialVideoSrc,
+  initialFileName = "clip",
+  initialIsLoadedData = false,
+  onMounted,
+}: Tier1ReviewPageProps): React.ReactElement {
+  const [videoSrc, setVideoSrc] = useState<string | null>(initialVideoSrc ?? null);
+  const [loadedFileName, setLoadedFileName] = useState<string>(initialFileName);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [isLoadedData, setIsLoadedData] = useState(false);
+  const [isLoadedData, setIsLoadedData] = useState(initialIsLoadedData);
   const [sampleIntervalSec, setSampleIntervalSec] = useState<number>(DEFAULT_SAMPLE_INTERVAL_SEC);
   const [samplerMode, setSamplerMode] = useState<"rvfc" | "seek">("rvfc");
+
+  // Console and runtime error tracking HUD
+  const [consoleErrors, setConsoleErrors] = useState<ConsoleErrorEntry[]>([]);
 
   // Stall recovery tracking (Req 1)
   const [recoveryCount, setRecoveryCount] = useState<number>(0);
@@ -55,13 +82,17 @@ export function Tier1ReviewPage({ onBack }: { onBack: () => void }): React.React
   // Sample spacing tracking (Requirement 1)
   const [sampleSpacingStats, setSampleSpacingStats] = useState<SampleSpacingStats | null>(null);
 
-  const [metrics, setMetrics] = useState<Tier1Metrics>({
-    fps: 0,
-    latencyMs: 0,
-    backend: "initializing",
-    loadTimeMs: 0,
-    status: "idle",
-  });
+  const [metrics, setMetrics] = useState<Tier1Metrics>(
+    customDetector
+      ? customDetector.getMetrics()
+      : {
+          fps: 0,
+          latencyMs: 0,
+          backend: "initializing",
+          loadTimeMs: 0,
+          status: "idle",
+        }
+  );
   const [alertLogs, setAlertLogs] = useState<LoggedAlert[]>([]);
   const [decisionLogs, setDecisionLogs] = useState<TrackDecisionLog[]>([]);
   const [decisionFilter, setDecisionFilter] = useState<"all" | "alerted" | "suppressed">("all");
@@ -107,15 +138,52 @@ export function Tier1ReviewPage({ onBack }: { onBack: () => void }): React.React
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const detectorRef = useRef<Tier1Detector | null>(null);
 
+  // Capture browser console errors and unhandled promise rejections live on screen
   useEffect(() => {
-    const detector = new Tier1Detector(config);
+    const handleWindowError = (event: ErrorEvent) => {
+      const timeStr = new Date().toLocaleTimeString();
+      const msg = event.message || (event.error ? String(event.error) : "Unknown Window Error");
+      setConsoleErrors((prev) => [{ time: timeStr, message: msg }, ...prev.slice(0, 19)]);
+    };
+
+    const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
+      const timeStr = new Date().toLocaleTimeString();
+      const msg = `Unhandled Rejection: ${String(event.reason || "Unknown reason")}`;
+      setConsoleErrors((prev) => [{ time: timeStr, message: msg }, ...prev.slice(0, 19)]);
+    };
+
+    const origConsoleError = console.error;
+    console.error = (...args: unknown[]) => {
+      origConsoleError.apply(console, args);
+      const timeStr = new Date().toLocaleTimeString();
+      const msg = args.map((a) => (typeof a === "object" ? JSON.stringify(a) : String(a))).join(" ");
+      setConsoleErrors((prev) => [{ time: timeStr, message: msg }, ...prev.slice(0, 19)]);
+    };
+
+    window.addEventListener("error", handleWindowError);
+    window.addEventListener("unhandledrejection", handleUnhandledRejection);
+
+    return () => {
+      console.error = origConsoleError;
+      window.removeEventListener("error", handleWindowError);
+      window.removeEventListener("unhandledrejection", handleUnhandledRejection);
+    };
+  }, []);
+
+  useEffect(() => {
+    const detector = customDetector || new Tier1Detector(config);
     detectorRef.current = detector;
 
-    detector.onMetrics((m) => {
+    const unsubMetrics = detector.onMetrics((m) => {
       setMetrics(m);
     });
 
-    detector.onAlert((alert) => {
+    const unsubError = detector.onError((err) => {
+      const timeStr = new Date().toLocaleTimeString();
+      setConsoleErrors((prev) => [{ time: timeStr, message: `[Detector Error] ${err}` }, ...prev.slice(0, 19)]);
+    });
+
+    const unsubAlert = detector.onAlert((alert) => {
       setActiveAlert(alert);
       const currentTime = videoRef.current ? videoRef.current.currentTime : 0;
       const phraseEn = buildPhrase(
@@ -152,7 +220,7 @@ export function Tier1ReviewPage({ onBack }: { onBack: () => void }): React.React
       ]);
     });
 
-    detector.onDecision((d) => {
+    const unsubDecision = detector.onDecision((d) => {
       setDecisionLogs((prev) => [
         { ...d, clip: loadedFileName },
         ...prev.slice(0, 499),
@@ -162,11 +230,17 @@ export function Tier1ReviewPage({ onBack }: { onBack: () => void }): React.React
     detector.start();
 
     return () => {
-      detector.stop();
+      unsubMetrics();
+      unsubError();
+      unsubAlert();
+      unsubDecision();
+      if (!customDetector) {
+        detector.stop();
+      }
       samplerRef.current?.cancel();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loadedFileName]);
+  }, [loadedFileName, customDetector]);
 
   // Attach media event listeners to video element (Req 1 & 2)
   useEffect(() => {
@@ -373,12 +447,15 @@ export function Tier1ReviewPage({ onBack }: { onBack: () => void }): React.React
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    if (canvas.width !== width || canvas.height !== height) {
-      canvas.width = width;
-      canvas.height = height;
+    const drawW = width > 0 ? width : (videoRef.current?.videoWidth || 320);
+    const drawH = height > 0 ? height : (videoRef.current?.videoHeight || 180);
+
+    if (canvas.width !== drawW || canvas.height !== drawH) {
+      canvas.width = drawW;
+      canvas.height = drawH;
     }
 
-    ctx.clearRect(0, 0, width, height);
+    ctx.clearRect(0, 0, drawW, drawH);
 
     // Draw direction thirds
     ctx.strokeStyle = "rgba(255, 255, 255, 0.25)";
@@ -422,6 +499,25 @@ export function Tier1ReviewPage({ onBack }: { onBack: () => void }): React.React
       ctx.fillText(label, x + 4, Math.max(14, y - 5));
     }
   };
+
+  const processFrame = async (mediaTime: number) => {
+    const video = videoRef.current;
+    const detector = detectorRef.current;
+    if (!video || !detector) return;
+    const res = await detector.detectFrame(video, mediaTime);
+    const w = video.videoWidth > 0 ? video.videoWidth : 320;
+    const h = video.videoHeight > 0 ? video.videoHeight : 180;
+    drawOverlay(res.updatedTracks, w, h);
+  };
+
+  useEffect(() => {
+    if (onMounted) {
+      onMounted({
+        processFrame,
+        runClipEvaluation,
+      });
+    }
+  }, [onMounted]);
 
   // requestVideoFrameCallback sampling with stall recovery (Req 1 & 3)
   const handleStartSampler = async () => {
@@ -785,6 +881,132 @@ export function Tier1ReviewPage({ onBack }: { onBack: () => void }): React.React
           </button>
         </div>
       )}
+
+      {/* Tier 1 Detector Status & Telemetry HUD */}
+      <section
+        style={{
+          background: "#18181b",
+          border: metrics.status === "error" ? "1px solid #ef4444" : "1px solid #27272a",
+          borderRadius: "6px",
+          padding: "0.8rem",
+          marginBottom: "1rem",
+          fontSize: "0.8rem",
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.6rem" }}>
+          <h2 style={{ margin: 0, fontSize: "0.92rem", color: "#a78bfa" }}>
+            Tier 1 Detector Status & Telemetry
+          </h2>
+          <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+            <span
+              data-testid="tier1-status-badge"
+              style={{
+                padding: "2px 8px",
+                borderRadius: "4px",
+                fontSize: "0.72rem",
+                fontWeight: "bold",
+                background:
+                  metrics.status === "ready"
+                    ? "#15803d"
+                    : metrics.status === "loading"
+                    ? "#854d0e"
+                    : metrics.status === "error"
+                    ? "#991b1b"
+                    : "#3f3f46",
+                color: "#fff",
+              }}
+            >
+              Status: {metrics.status.toUpperCase()}
+            </span>
+          </div>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: "0.5rem" }}>
+          <div>
+            Backend: <strong data-testid="tier1-backend" style={{ color: "#38bdf8" }}>{metrics.backend}</strong>
+          </div>
+          <div>
+            Load Time: <strong data-testid="tier1-load-time">{metrics.loadTimeMs} ms</strong>
+          </div>
+          <div>
+            Model URL: <strong data-testid="tier1-model-url" style={{ color: "#a1a1aa", fontSize: "0.75rem" }}>/models/coco-ssd/model.json</strong>
+          </div>
+          <div>
+            Inference: <strong>{metrics.fps} FPS</strong> ({metrics.latencyMs} ms)
+          </div>
+          <div>
+            Identity Gate: <strong data-testid="tier1-identity-gate" style={{ color: "#facc15" }}>{config.identityMaxHeightRatio ?? 3.0}x height | {config.identityMaxAreaRatio ?? 9.0}x area</strong>
+          </div>
+          <div style={{ gridColumn: "1 / -1" }}>
+            Error Details:{" "}
+            <strong
+              data-testid="tier1-error-details"
+              style={{ color: metrics.errorMessage ? "#ef4444" : "#a1a1aa" }}
+            >
+              {metrics.errorMessage ?? "None"}
+            </strong>
+          </div>
+        </div>
+      </section>
+
+      {/* Browser Console & Runtime Errors Panel */}
+      <section
+        style={{
+          background: consoleErrors.length > 0 ? "rgba(127, 29, 29, 0.2)" : "#18181b",
+          border: consoleErrors.length > 0 ? "1px solid #ef4444" : "1px solid #27272a",
+          borderRadius: "6px",
+          padding: "0.8rem",
+          marginBottom: "1rem",
+          fontSize: "0.8rem",
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.4rem" }}>
+          <h2 style={{ margin: 0, fontSize: "0.92rem", color: consoleErrors.length > 0 ? "#f87171" : "#a1a1aa" }}>
+            Browser Console & Runtime Errors {consoleErrors.length > 0 ? `(${consoleErrors.length})` : ""}
+          </h2>
+          {consoleErrors.length > 0 && (
+            <button
+              onClick={() => setConsoleErrors([])}
+              style={{
+                padding: "2px 8px",
+                background: "#27272a",
+                color: "#f4f4f5",
+                border: "1px solid #3f3f46",
+                borderRadius: "4px",
+                fontSize: "0.72rem",
+                cursor: "pointer",
+              }}
+            >
+              Clear Errors
+            </button>
+          )}
+        </div>
+        {consoleErrors.length === 0 ? (
+          <div data-testid="console-clean-status" style={{ color: "#71717a", fontSize: "0.75rem" }}>
+            ✓ No browser console errors recorded.
+          </div>
+        ) : (
+          <div data-testid="console-errors-list" style={{ display: "flex", flexDirection: "column", gap: "0.3rem" }}>
+            {consoleErrors.map((err, idx) => (
+              <div
+                key={idx}
+                style={{
+                  background: "#09090b",
+                  borderLeft: "3px solid #ef4444",
+                  padding: "4px 8px",
+                  borderRadius: "2px",
+                  fontFamily: "monospace",
+                  fontSize: "0.72rem",
+                  color: "#fca5a5",
+                  wordBreak: "break-word",
+                }}
+              >
+                [{err.time}] {err.message}
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
 
       {/* Video Diagnostics HUD with Stall Recovery tracking (Req 1) */}
       <section
@@ -1409,7 +1631,7 @@ export function Tier1ReviewPage({ onBack }: { onBack: () => void }): React.React
           </div>
           <div>
             <label style={{ display: "block", marginBottom: "4px" }}>
-              Min Track Duration: <strong>{config.minTrackDurationSec ?? 0.8} s</strong>
+              Slow-Growth Min Track: <strong>{config.minTrackDurationSec ?? 0.8} s</strong>
             </label>
             <input
               type="range"
@@ -1418,6 +1640,104 @@ export function Tier1ReviewPage({ onBack }: { onBack: () => void }): React.React
               step="0.1"
               value={config.minTrackDurationSec ?? 0.8}
               onChange={(e) => handleConfigChange("minTrackDurationSec", parseFloat(e.target.value))}
+              style={{ width: "100%" }}
+            />
+          </div>
+          <div>
+            <label style={{ display: "block", marginBottom: "4px" }}>
+              Fast-Closing Min Track: <strong>{config.fastClosingTrackDurationSec ?? 0.4} s</strong>
+            </label>
+            <input
+              type="range"
+              min="0.2"
+              max="1.5"
+              step="0.1"
+              value={config.fastClosingTrackDurationSec ?? 0.4}
+              onChange={(e) => handleConfigChange("fastClosingTrackDurationSec", parseFloat(e.target.value))}
+              style={{ width: "100%" }}
+            />
+          </div>
+          <div>
+            <label style={{ display: "block", marginBottom: "4px" }}>
+              Fast-Closing Min Height: <strong>{config.fastClosingMinHFrac ?? 0.40}</strong>
+            </label>
+            <input
+              type="range"
+              min="0.10"
+              max="0.80"
+              step="0.05"
+              value={config.fastClosingMinHFrac ?? 0.40}
+              onChange={(e) => handleConfigChange("fastClosingMinHFrac", parseFloat(e.target.value))}
+              style={{ width: "100%" }}
+            />
+          </div>
+          <div>
+            <label style={{ display: "block", marginBottom: "4px" }}>
+              Fast-Closing Min ΔHeight: <strong>{config.fastClosingDeltaHFrac ?? 0.15}</strong>
+            </label>
+            <input
+              type="range"
+              min="0.05"
+              max="0.50"
+              step="0.05"
+              value={config.fastClosingDeltaHFrac ?? 0.15}
+              onChange={(e) => handleConfigChange("fastClosingDeltaHFrac", parseFloat(e.target.value))}
+              style={{ width: "100%" }}
+            />
+          </div>
+          <div>
+            <label style={{ display: "block", marginBottom: "4px" }}>
+              Fast-Closing Growth Rate / s: <strong>{config.fastClosingGrowthRatePerSec ?? 0.20}</strong>
+            </label>
+            <input
+              type="range"
+              min="0.05"
+              max="0.80"
+              step="0.05"
+              value={config.fastClosingGrowthRatePerSec ?? 0.20}
+              onChange={(e) => handleConfigChange("fastClosingGrowthRatePerSec", parseFloat(e.target.value))}
+              style={{ width: "100%" }}
+            />
+          </div>
+          <div>
+            <label style={{ display: "block", marginBottom: "4px" }}>
+              Identity Gate Max Height Ratio: <strong>{config.identityMaxHeightRatio ?? 3.0}x</strong>
+            </label>
+            <input
+              type="range"
+              min="1.5"
+              max="6.0"
+              step="0.5"
+              value={config.identityMaxHeightRatio ?? 3.0}
+              onChange={(e) => handleConfigChange("identityMaxHeightRatio", parseFloat(e.target.value))}
+              style={{ width: "100%" }}
+            />
+          </div>
+          <div>
+            <label style={{ display: "block", marginBottom: "4px" }}>
+              Identity Gate Max Area Ratio: <strong>{config.identityMaxAreaRatio ?? 9.0}x</strong>
+            </label>
+            <input
+              type="range"
+              min="2.0"
+              max="20.0"
+              step="1.0"
+              value={config.identityMaxAreaRatio ?? 9.0}
+              onChange={(e) => handleConfigChange("identityMaxAreaRatio", parseFloat(e.target.value))}
+              style={{ width: "100%" }}
+            />
+          </div>
+          <div>
+            <label style={{ display: "block", marginBottom: "4px" }}>
+              Static Obstacle Min Track: <strong>{config.staticMinTrackDurationSec ?? 0.4} s</strong>
+            </label>
+            <input
+              type="range"
+              min="0.1"
+              max="1.5"
+              step="0.1"
+              value={config.staticMinTrackDurationSec ?? 0.4}
+              onChange={(e) => handleConfigChange("staticMinTrackDurationSec", parseFloat(e.target.value))}
               style={{ width: "100%" }}
             />
           </div>

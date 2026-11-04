@@ -122,13 +122,67 @@ Throttle levels are defined in AGENTS.md (warn $60, throttle $90, block dev call
       - Tier 2 Recall on stairs: **100.0% (1/1 hit)**
       - Tier 2 Recall on wall: **0.0% (0/2 hit)**
       - Overall Tier 2 Recall on misses: **33.3% (1/3 hit)**
+  - **Ground Truth Corrections & Strict Verification**:
+    - Deleted synthetic misses ($t=14.80, 21.20, 32.40$) and removed automated ground-truth labeling (`d.label = "Correct silence"`) from `apps/web/src/tier1/run_clip_eval.ts`. Unlabeled rows remain unlabeled (`""`) and are excluded from TN, FP, and precision metrics.
+    - Ground truth loaded strictly from user-provided CSVs: `eval/clip_006_mp4_tier1_decisions_1793559223689.csv` (misses at $6.28$ other center, $15.90$ other right, $18.11$ stairs center, $34.61$ stairs center) and `eval/clip_001_mp4_tier1_decisions.csv` (misses at $11.50$ person right, vehicle right).
+    - Extended `scripts/check_clip_hazards.py` to evaluate both **Strict Hit** (exact semantic type match) and **Loose Hit** (any valid hazard in the expected direction) within a $\pm 1.5$ s window.
+    - Measured Tier 2 Perception on user `clip_006` misses:
+      - $t=6.28$s other (center): Tier 2 detected `stairs(center)` (t=6.3s, 7.3s), dist=near, urg=2, latency=7440ms, retries=0/1 -> Strict: MISS, Loose: **HIT**
+      - $t=15.90$s other (right): Tier 2 detected `stairs(center)` (t=15.9s, 16.9s), dist=near, urg=3, latency=4274ms, retries=0/6 -> Strict: MISS, Loose: **HIT**
+      - $t=18.11$s stairs (center): Tier 2 detected `stairs(center)` (t=17.1s, 18.1s), dist=near, urg=2, latency=3129ms, retries=0/7 -> Strict: **HIT**, Loose: **HIT**
+      - $t=34.61$s stairs (center): Tier 2 detected `stairs(center)` (t=34.6s, 35.6s), dist=near, urg=2, latency=4729ms, retries=0/11 -> Strict: **HIT**, Loose: **HIT**
+      - Summary: Stairs strict recall = **100.0% (2/2)**, Other strict recall = **0.0% (0/2)**. Overall Strict Recall = **50.0% (2/4)**, Overall Loose Recall = **100.0% (4/4)**.
+    - Measured Tier 2 Perception on user `clip_001` misses ($t=11.50$s):
+      - $t=11.50$s person (right): Tier 2 detected `vehicle(center)` (t=10.5s, 11.5s), dist=near, urg=3, latency=9672ms, retries=0/2 -> Strict: MISS, Loose: **HIT**
+      - $t=11.50$s vehicle (right): Tier 2 detected `vehicle(center)` (t=10.5s, 11.5s), dist=mid, urg=2, latency=6481ms, retries=0/4 -> Strict: **HIT**, Loose: **HIT**
+      - Summary: Vehicle strict recall = **100.0% (1/1)**, Person strict recall = **0.0% (0/1)**. Overall Strict Recall = **50.0% (1/2)**, Overall Loose Recall = **100.0% (2/2)**.
+    - Inspected `clip_001` ($t=10.0$ to $14.0$ s): Confirmed vehicle (#6) and person (#5) at $t=11.20-11.60$ s were suppressed by Rule 1 (`trackedDuration < 0.80s` before alerting moving objects) and AGENTS.md Rule 8 (lateral divergence; objects moving further right away from heading).
+  - **Tier 1 Fast-Closing Override & Evaluation Rerun**:
+    - Implemented fast-closing override for moving classes (`vehicle`, `bicycle`, `person`):
+      - If $h_{\text{frac}}$ grows by $\ge 0.15$ between consecutive samples (or closing speed / area growth $> 0.20$/s) AND $h_{\text{frac}} \ge 0.40$, alerts after 2 frames ($0.40$ s tracking) from ANY direction.
+      - Uses caution wording only: `"Vehicle on right, careful"` / `"गाड़ी दाएँ, सावधान"` (Rule 8: no steering words for moving hazards; `clear_side: "none"`).
+      - Retained $0.80$ s minimum tracking rule for slow-growth moving objects and $0.40$ s for static objects.
+      - Exposed all parameters in `Tier1Config` and added interactive controls to `/#tier1` (`Tier1ReviewPage.tsx`).
+      - Lateral-path suppression bypassed for fast-closing near vehicles.
+    - Added unit tests in `apps/web/src/tier1/math.test.ts` covering fast-closing override, lateral suppression bypass, slow-growth tracking, and Hindi/English caution phrases (130/130 vitest passed).
+    - Executed deterministic 0.40s offline evaluation on both user CSV-labeled clips (Node.js on CPU):
+      - `clip_001.mp4`: Alerted at $t=11.60$s (`vehicle(right)`, $h=0.66$, $v=0.28$/s). User labeled miss `vehicle(right)` at $t=11.50$s is now **CAUGHT** ($t=11.60$s). False alert on `person(center)` at $t=1.20$s eliminated after enforcing that override requires at least 2 consecutive matched samples of the same track without intervening gaps ($dt \le 0.55$s) and growth $\ge 0.20$/s trigger. User miss `person(right)` at $t=11.50$s remains missed (only 1 frame detected, tracked $0.00$s). New alerts to judge: $t=11.60$s `vehicle(right)` (unlabeled).
+      - `clip_006.mp4`: 0 alerts fired. User labeled misses at $t=6.28$s, $15.90$s, $18.11$s, $34.61$s remain missed by Tier 1 (stairs/other handled by Tier 2).
+  - **Tier 1 Tracker Identity Gate & Review Page Diagnostics (Nov 03-04)**:
+    - **Tracker Identity Gate Calibration**:
+      - Configurable gate thresholds in `Tier1Config` / `DEFAULT_TIER1_CONFIG`:
+        - `identityMaxHeightRatio: 3.0` (reject match within 0.55s only if height ratio $> 3.0\times$)
+        - `identityMaxAreaRatio: 9.0` (reject match within 0.55s only if area ratio $> 9.0\times$)
+      - Displayed on `/#tier1` (`Tier1ReviewPage.tsx`) in both the Status & Telemetry HUD and interactive tuning sliders.
+      - Preserves real fast-closing vehicles: in `clip_001` vehicle goes $h_{\text{frac}} = 0.333 \rightarrow 0.660$ ($1.98\times$) and area $0.0414 \rightarrow 0.1538$ ($3.7\times$) between $t=11.20$s and $11.60$s, safely below the $3.0\times$ and $9.0\times$ thresholds.
+      - Rejects person identity switch ($5.19\times$ height shrinkage and $30.4\times$ area change) without falsely splitting fast-closing vehicles.
+      - Added regression unit tests in `apps/web/src/tier1/math.test.ts`:
+        - Real vehicle sequence at $t=11.20-11.60$s: track is kept (`consecutiveFrames: 2`) and `fast_closing_override` alert fires at $11.60$s.
+        - Person identity switch at $t=0.0-1.2$s: match rejected ($5.19\times > 3.0\times$), new track created, no false override alert fires.
+    - **Tier 1 Status & Telemetry HUD**:
+      - Diagnostics card on `/#tier1` (`Tier1ReviewPage.tsx`) displaying:
+        - Detector status badge (`READY`, `LOADING`, `ERROR`, `IDLE`).
+        - Active backend (`webgl`, `wasm`, `cpu`, `initializing`).
+        - Model load time in milliseconds.
+        - Model URL (`/models/coco-ssd/model.json`).
+        - Identity Gate thresholds (`3.0x height | 9.0x area`).
+        - Model load error details (`metrics.errorMessage || "None"`).
+        - Runtime FPS and inference latency.
+    - **Live Browser Console & Runtime Errors Panel**:
+      - Intercepts `window.addEventListener("error")`, `window.addEventListener("unhandledrejection")`, `console.error`, and `detector.onError`.
+      - Displays real-time error logs on screen with timestamps and clear button, exposing any silent model load / WebGL / network failures on mobile Chrome.
+    - **Component Test Suite**:
+      - Created `apps/web/src/tier1/Tier1ReviewPage.test.tsx` (3 tests):
+        - Renders page with mocked detector fixture and verifies status telemetry HUD values and clean console state.
+        - Triggers frame evaluation and asserts canvas bounding boxes are drawn (`mockCtx.strokeRect`, `mockCtx.fillText`) and decision rows appear in the DOM table (`alerted`, `fast_closing_override`, `vehicle`, $t=11.60$s).
+        - Verifies decision rows remain unlabeled (`""`) per AGENTS.md Rules 9 & 10.
+        - Verifies console errors panel captures and displays errors when error events occur.
   - **Testing & Verification**:
-    - `vitest run`: 126/126 passed across 8 test suites.
-    - `tsc --noEmit`: 0 errors.
-    - `eslint`: 0 errors.
-    - `pytest server/tests`: 28 passed.
-    - `ruff`: all checks passed.
-    - `mypy`: 0 errors.
+    - `apps/web` Vitest: **137/137 passed** across 9 test files (0 failures).
+    - `npm run build` in `apps/web`: compiled cleanly (`dist/assets/worker-*.js` 2,114 kB, `dist/assets/index-*.js` 338 kB).
+    - Offline Clip Evaluation runs on Node.js CPU:
+      - `clip_001.mp4`: 1 alert fired at $t=11.60$s (`fast_closing_override`, $h=0.66$, $v=0.28$/s, right). User miss `vehicle(right)` at $t=11.50$s caught. All new alerts unlabeled (`""`).
+      - `clip_006.mp4`: 0 alerts fired. All rows unlabeled (`""`).
 - Next: P4 Tier 2 hardening, rate limiter, spend guard.
 - Blockers: None
 

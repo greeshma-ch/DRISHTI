@@ -243,6 +243,89 @@ export function computeClearSide(direction: Direction): "left" | "right" | "none
   return "right";
 }
 
+export interface FastClosingCheckResult {
+  isFastClosing: boolean;
+  deltaHFrac: number;
+  hGrowthRate: number;
+  areaGrowthRate: number;
+  currHFrac: number;
+  reason?: string;
+}
+
+/**
+ * Check fast-closing override condition:
+ * For vehicle, bicycle or person, if h_frac grows by 0.15 or more between two consecutive samples
+ * (or growth above 0.2 per second) and h_frac reaches 0.4 or more, alert after 2 frames (0.4 s of tracking)
+ * from ANY direction.
+ */
+export function checkFastClosing(
+  tracked: TrackedObject,
+  frameHeight: number,
+  config: Tier1Config = DEFAULT_TIER1_CONFIG
+): FastClosingCheckResult {
+  const targetClasses = new Set<Tier1HazardType>(["vehicle", "bicycle", "person"]);
+  if (!targetClasses.has(tracked.hazardType)) {
+    return { isFastClosing: false, deltaHFrac: 0, hGrowthRate: 0, areaGrowthRate: 0, currHFrac: 0 };
+  }
+
+  // The override must compare two matched samples of the same track, never a first detection against nothing.
+  // Require at least 2 matched samples before the override can fire.
+  if (tracked.history.length < 2) {
+    return { isFastClosing: false, deltaHFrac: 0, hGrowthRate: 0, areaGrowthRate: 0, currHFrac: 0 };
+  }
+
+  const pCurr = tracked.history[tracked.history.length - 1]!;
+  const pPrev = tracked.history[tracked.history.length - 2]!;
+
+  const dt = pCurr.timestamp - pPrev.timestamp;
+  // Two matched samples must be consecutive without an intervening gap (nominal interval 0.25-0.4s; <= 0.55s)
+  if (dt <= 0 || dt > 0.55) {
+    return { isFastClosing: false, deltaHFrac: 0, hGrowthRate: 0, areaGrowthRate: 0, currHFrac: 0 };
+  }
+
+  const currHFrac = pCurr.h_frac ?? (frameHeight > 0 ? tracked.bbox[3] / frameHeight : 0);
+  const prevHFrac = pPrev.h_frac ?? (frameHeight > 0 && pPrev.bbox ? pPrev.bbox[3] / frameHeight : 0);
+
+  const deltaHFrac = currHFrac - prevHFrac;
+  const hGrowthRate = dt > 0 ? deltaHFrac / dt : 0;
+  const areaGrowthRate = dt > 0 ? (pCurr.area - pPrev.area) / dt : 0;
+  const closingSpeed = computeClosingSpeedPerSec(tracked.history, config.minClosingDurationSec ?? 0.6);
+
+  const minHFrac = config.fastClosingMinHFrac ?? 0.40;
+  const deltaThresh = config.fastClosingDeltaHFrac ?? 0.15;
+  const growthRateThresh = config.fastClosingGrowthRatePerSec ?? 0.20;
+
+  // Growth per second (area growth rate or closing speed)
+  const growthPerSec = Math.max(areaGrowthRate, closingSpeed);
+
+  // Condition:
+  // Must compare two consecutive matched samples (dt <= 0.55s)
+  // Must grow fast: deltaHFrac >= 0.15 OR growthPerSec >= 0.20/s
+  // AND growth per second must not be below 0.20/s trigger (effective growth >= 0.20/s)
+  // AND currHFrac >= 0.40
+  const reachesMinH = currHFrac >= minHFrac;
+  const growsFast = (deltaHFrac >= deltaThresh || growthPerSec >= growthRateThresh) && growthPerSec >= growthRateThresh;
+
+  if (growsFast && reachesMinH) {
+    return {
+      isFastClosing: true,
+      deltaHFrac,
+      hGrowthRate,
+      areaGrowthRate: growthPerSec,
+      currHFrac,
+      reason: `fast closing: Δh=${deltaHFrac.toFixed(2)}, growth=${growthPerSec.toFixed(2)}/s, h=${currHFrac.toFixed(2)} >= ${minHFrac}`,
+    };
+  }
+
+  return {
+    isFastClosing: false,
+    deltaHFrac,
+    hGrowthRate,
+    areaGrowthRate: growthPerSec,
+    currHFrac,
+  };
+}
+
 export interface HazardEvaluationDetails {
   alert: Tier1Alert | null;
   decision: "alerted" | `suppressed: ${string}`;
@@ -272,56 +355,75 @@ export function evaluateHazardDetails(
   let ruleFired = "none";
 
   if (isMovingClass) {
-    // MOVING OBJECT SAFETY (Requirement 1: time-based rules)
-    // 1. Must be tracked for at least minTrackDurationSec (default 0.8 s)
-    const minTrackDur = config.minTrackDurationSec ?? 0.8;
-    if (trackedDuration < minTrackDur) {
-      return {
-        alert: null,
-        decision: "suppressed: not_tracked_long_enough",
-        rule: "min_track_duration",
-        reason: `${tracked.hazardType} tracked ${trackedDuration.toFixed(2)}s < ${minTrackDur}s`,
-      };
-    }
+    const fastClosing = checkFastClosing(tracked, frameHeight, config);
 
-    // 2. Position / trajectory check:
-    // Center third: alert. Side object: must be near AND moving toward center.
-    if (direction !== "center") {
-      const movingTowardCenter = isMovingTowardCenter(tracked.history, frameWidth);
-      if (distance !== "near" || !movingTowardCenter) {
+    if (fastClosing.isFastClosing) {
+      // Fast-closing override (Req 1 & 3):
+      // Alert after 2 frames (0.4s of tracking) from ANY direction.
+      // Lateral-path suppression does NOT apply to near vehicles/moving objects closing fast.
+      const fastClosingTrackDur = config.fastClosingTrackDurationSec ?? 0.4;
+      if (trackedDuration < fastClosingTrackDur || tracked.history.length < 2) {
         return {
           alert: null,
-          decision: "suppressed: not_in_path",
-          rule: "side_passing_silent",
-          reason: `side ${tracked.hazardType} on ${direction} (${distance}) not near/converging`,
+          decision: "suppressed: not_tracked_long_enough",
+          rule: "fast_closing_debounce",
+          reason: `fast closing ${tracked.hazardType} tracked ${trackedDuration.toFixed(2)}s < ${fastClosingTrackDur}s`,
         };
       }
-    }
-
-    // 3. Closing speed must be sustained for at least minClosingDurationSec (default 0.6 s)
-    const threshold = getClosingThreshold(tracked.hazardType, config);
-    if (!isClosingSustained(tracked.history, minClosingDur, threshold)) {
-      return {
-        alert: null,
-        decision: "suppressed: closing_not_sustained",
-        rule: "closing_sustained",
-        reason: `${tracked.hazardType} speed ${closingSpeed.toFixed(2)}/s < ${threshold}/s or not sustained for ${minClosingDur}s`,
-      };
-    }
-
-    // 4. Urgency assignment
-    if (direction === "center") {
-      ruleFired = "center_approach";
-      if (distance === "near") {
-        urgency = 3; // Near and closing -> urgency 3
-      } else if (distance === "mid") {
-        urgency = 2; // Mid closing -> urgency 2
-      } else {
-        urgency = closingSpeed > config.fastClosingThresholdPerSec ? 2 : 1;
-      }
-    } else {
-      ruleFired = "side_near_closing_converging";
+      ruleFired = "fast_closing_override";
       urgency = 3;
+    } else {
+      // Normal moving object safety (Requirement 2: slow growth time-based rules)
+      // 1. Must be tracked for at least minTrackDurationSec (default 0.8 s)
+      const minTrackDur = config.minTrackDurationSec ?? 0.8;
+      if (trackedDuration < minTrackDur) {
+        return {
+          alert: null,
+          decision: "suppressed: not_tracked_long_enough",
+          rule: "min_track_duration",
+          reason: `${tracked.hazardType} tracked ${trackedDuration.toFixed(2)}s < ${minTrackDur}s`,
+        };
+      }
+
+      // 2. Position / trajectory check:
+      // Center third: alert. Side object: must be near AND moving toward center.
+      if (direction !== "center") {
+        const movingTowardCenter = isMovingTowardCenter(tracked.history, frameWidth);
+        if (distance !== "near" || !movingTowardCenter) {
+          return {
+            alert: null,
+            decision: "suppressed: not_in_path",
+            rule: "side_passing_silent",
+            reason: `side ${tracked.hazardType} on ${direction} (${distance}) not near/converging`,
+          };
+        }
+      }
+
+      // 3. Closing speed must be sustained for at least minClosingDurationSec (default 0.6 s)
+      const threshold = getClosingThreshold(tracked.hazardType, config);
+      if (!isClosingSustained(tracked.history, minClosingDur, threshold)) {
+        return {
+          alert: null,
+          decision: "suppressed: closing_not_sustained",
+          rule: "closing_sustained",
+          reason: `${tracked.hazardType} speed ${closingSpeed.toFixed(2)}/s < ${threshold}/s or not sustained for ${minClosingDur}s`,
+        };
+      }
+
+      // 4. Urgency assignment
+      if (direction === "center") {
+        ruleFired = "center_approach";
+        if (distance === "near") {
+          urgency = 3; // Near and closing -> urgency 3
+        } else if (distance === "mid") {
+          urgency = 2; // Mid closing -> urgency 2
+        } else {
+          urgency = closingSpeed > config.fastClosingThresholdPerSec ? 2 : 1;
+        }
+      } else {
+        ruleFired = "side_near_closing_converging";
+        urgency = 3;
+      }
     }
   } else {
     // STATIC OBSTACLE (chair, table, bench, pole, plant, bag, etc.)
@@ -481,6 +583,29 @@ export function updateTracker(
       const det = unmatchedDetections[i]!;
       if (det.class !== track.class) continue;
 
+      // Tracker identity: reject a match when h_frac changes by more than 3.0x
+      // (or the area by more than 9.0x) between two samples within 0.55 s; start a new track instead.
+      const maxHRatio = config.identityMaxHeightRatio ?? 3.0;
+      const maxAreaRatio = config.identityMaxAreaRatio ?? 9.0;
+      if (gap <= 0.55) {
+        const trackH = track.bbox[3];
+        const detH = det.bbox[3];
+        if (trackH > 0 && detH > 0) {
+          const hRatio = Math.max(trackH, detH) / Math.min(trackH, detH);
+          if (hRatio > maxHRatio) {
+            continue;
+          }
+        }
+        const trackArea = track.bbox[2] * track.bbox[3];
+        const detArea = det.bbox[2] * det.bbox[3];
+        if (trackArea > 0 && detArea > 0) {
+          const areaRatio = Math.max(trackArea, detArea) / Math.min(trackArea, detArea);
+          if (areaRatio > maxAreaRatio) {
+            continue;
+          }
+        }
+      }
+
       const iou = computeIoU(track.bbox, det.bbox);
       const centroidDist = computeCentroidDistance(track.bbox, det.bbox, frameWidth, frameHeight);
 
@@ -499,8 +624,12 @@ export function updateTracker(
       const normArea = (match.bbox[2] * match.bbox[3]) / frameArea;
       const cx = (match.bbox[0] + match.bbox[2] / 2) / frameWidth;
       const cy = (match.bbox[1] + match.bbox[3] / 2) / frameHeight;
+      const h_frac = frameHeight > 0 ? match.bbox[3] / frameHeight : 0;
 
-      const newHistory = [...track.history, { area: normArea, timestamp: timestampSec, cx, cy }];
+      const newHistory = [
+        ...track.history,
+        { area: normArea, timestamp: timestampSec, cx, cy, h_frac, bbox: match.bbox },
+      ];
       // Keep up to 10 recent points
       if (newHistory.length > 10) newHistory.shift();
 
@@ -524,13 +653,14 @@ export function updateTracker(
     const normArea = (det.bbox[2] * det.bbox[3]) / frameArea;
     const cx = (det.bbox[0] + det.bbox[2] / 2) / frameWidth;
     const cy = (det.bbox[1] + det.bbox[3] / 2) / frameHeight;
+    const h_frac = frameHeight > 0 ? det.bbox[3] / frameHeight : 0;
 
     const newTrack: TrackedObject = {
       id: nextTrackId++,
       class: det.class,
       hazardType,
       bbox: det.bbox,
-      history: [{ area: normArea, timestamp: timestampSec, cx, cy }],
+      history: [{ area: normArea, timestamp: timestampSec, cx, cy, h_frac, bbox: det.bbox }],
       consecutiveFrames: 1,
       lastSeenTimestamp: timestampSec,
     };

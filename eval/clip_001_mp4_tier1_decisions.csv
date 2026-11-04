@@ -1,0 +1,4 @@
+id,clip,sample_time,t,class,direction,decision,reason,label
+"11.50_missed_person_right","clip_001.mp4",11.50,11.50,"person","right","missed_hazard","user labeled should-have-alerted","Should have alerted"
+"11.50_missed_vehicle_right","clip_001.mp4",11.50,11.50,"vehicle","right","missed_hazard","user labeled should-have-alerted","Should have alerted"
+

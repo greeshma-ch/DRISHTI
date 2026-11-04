@@ -281,6 +281,8 @@ Read AGENTS.md and PROGRESS.md first. Plan first and wait for my OK.
    contact and still offer tel:112. Emergency is P0 and never rate-limited.
 4. Voice command: "delete my data" / "मेरा डेटा मिटाओ" wipes local and server data after a spoken confirmation.
 Tests: countdown timing, cancel, offline fallback, profile persistence across reload.
+5. Do not edit the rate limiter or the Meta client. Keep emergency code in new files (server/emergency.py, apps/web/src/emergency.ts) and touch App.tsx only to mount it.
+6. /emergency/* routes are exempt from rate limiting (P4 adds the limiter in another session).
 
 Acceptance: the full emergency flow works end to end on the phone with a test contact.
 ```

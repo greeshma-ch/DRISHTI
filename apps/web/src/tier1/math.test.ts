@@ -711,4 +711,273 @@ describe("Tier 1 Math & Rules", () => {
       expect(getTrackedDurationSec(res2.updatedTracks[0]!.history)).toBe(0.0);
     });
   });
+
+  describe("Fast-closing override & lateral suppression tuning", () => {
+    const W = 640;
+    const H = 360;
+
+    it("triggers fast-closing override for vehicle on right after 2 frames (0.4s) with caution phrase", () => {
+      // Frame 1 at t = 11.20s: vehicle on right at mid distance (h=120/360 = 0.333)
+      const dets1: RawDetection[] = [
+        { bbox: [450, 60, 107, 120], class: "car", score: 0.9 },
+      ];
+      const step1 = updateTracker([], dets1, 11.20, W, H);
+      expect(step1.alerts.length).toBe(0);
+      expect(step1.decisions.length).toBe(1);
+      expect(step1.decisions[0]!.decision).toBe("suppressed: not_tracked_long_enough");
+
+      // Frame 2 at t = 11.60s: vehicle jumps to near (h=238/360 = 0.661 >= 0.40, deltaH = 0.328 >= 0.15)
+      const dets2: RawDetection[] = [
+        { bbox: [430, 60, 200, 238], class: "car", score: 0.92 },
+      ];
+      const step2 = updateTracker(step1.updatedTracks, dets2, 11.60, W, H);
+
+      // Fast-closing override fires after 2 frames (0.4s of tracking) from right direction!
+      expect(step2.alerts.length).toBe(1);
+      const alert = step2.alerts[0]!;
+      expect(alert.type).toBe("vehicle");
+      expect(alert.direction).toBe("right");
+      expect(alert.urgency).toBe(3);
+      expect(alert.clear_side).toBe("none"); // No steering words
+      expect(alert.ruleFired).toBe("fast_closing_override");
+
+      // Caution wording only: "Vehicle on right, careful" (Hard Rule 8)
+      const phraseEn = buildPhrase(alert, "en");
+      expect(phraseEn).toBe("Vehicle on right, careful");
+
+      const phraseHi = buildPhrase(alert, "hi");
+      expect(phraseHi).toBe("गाड़ी दाएँ, सावधान");
+
+      // Decision row is "alerted"
+      expect(step2.decisions.length).toBe(1);
+      expect(step2.decisions[0]!.decision).toBe("alerted");
+    });
+
+    it("bypasses lateral-path suppression for fast-closing near vehicles", () => {
+      // Vehicle on left side not moving toward center, but closing fast (h_frac >= 0.40 and delta >= 0.15)
+      const fastSideTrack: TrackedObject = {
+        id: 50,
+        class: "car",
+        hazardType: "vehicle",
+        bbox: [50, 50, 120, 180], // left side, h = 180/360 = 0.50 >= 0.40
+        history: [
+          { area: 0.05, timestamp: 0.0, cx: 0.15, cy: 0.5, h_frac: 0.25, bbox: [50, 50, 80, 90] },
+          { area: 0.15, timestamp: 0.4, cx: 0.12, cy: 0.5, h_frac: 0.50, bbox: [50, 50, 120, 180] }, // cx moving away from center (0.15 -> 0.12)
+        ],
+        consecutiveFrames: 2,
+        lastSeenTimestamp: 0.4,
+      };
+
+      const evalRes = evaluateHazardDetails(fastSideTrack, W, H);
+      expect(evalRes.alert).not.toBeNull();
+      expect(evalRes.alert!.urgency).toBe(3);
+      expect(evalRes.alert!.ruleFired).toBe("fast_closing_override");
+      expect(evalRes.alert!.direction).toBe("left");
+      expect(evalRes.alert!.clear_side).toBe("none");
+      expect(buildPhrase(evalRes.alert, "en")).toBe("Vehicle on left, careful");
+    });
+
+    it("applies lateral-path suppression to slow-growth side vehicles", () => {
+      // Slow side vehicle not moving toward center, tracked >= 0.8s but h_frac < 0.40
+      const slowSideTrack: TrackedObject = {
+        id: 51,
+        class: "car",
+        hazardType: "vehicle",
+        bbox: [50, 50, 80, 100], // left side, h = 100/360 = 0.278 < 0.40
+        history: [
+          { area: 0.03, timestamp: 0.0, cx: 0.15, cy: 0.5, h_frac: 0.22, bbox: [50, 50, 70, 80] },
+          { area: 0.04, timestamp: 0.4, cx: 0.14, cy: 0.5, h_frac: 0.25, bbox: [50, 50, 75, 90] },
+          { area: 0.05, timestamp: 0.8, cx: 0.13, cy: 0.5, h_frac: 0.28, bbox: [50, 50, 80, 100] },
+        ],
+        consecutiveFrames: 3,
+        lastSeenTimestamp: 0.8,
+      };
+
+      const evalRes = evaluateHazardDetails(slowSideTrack, W, H);
+      expect(evalRes.alert).toBeNull();
+      expect(evalRes.decision).toBe("suppressed: not_in_path");
+    });
+
+    it("supports fast-closing override for person and bicycle", () => {
+      // Person closing fast
+      const fastPerson: TrackedObject = {
+        id: 52,
+        class: "person",
+        hazardType: "person",
+        bbox: [480, 50, 80, 180], // right side, h = 180/360 = 0.50 >= 0.40
+        history: [
+          { area: 0.03, timestamp: 0.0, cx: 0.80, cy: 0.5, h_frac: 0.25, bbox: [480, 50, 50, 90] },
+          { area: 0.12, timestamp: 0.4, cx: 0.80, cy: 0.5, h_frac: 0.50, bbox: [480, 50, 80, 180] },
+        ],
+        consecutiveFrames: 2,
+        lastSeenTimestamp: 0.4,
+      };
+
+      const personRes = evaluateHazardDetails(fastPerson, W, H);
+      expect(personRes.alert).not.toBeNull();
+      expect(personRes.alert!.type).toBe("person");
+      expect(personRes.alert!.urgency).toBe(3);
+      expect(buildPhrase(personRes.alert, "en")).toBe("Person on right, careful");
+
+      // Bicycle closing fast in center
+      const fastBicycle: TrackedObject = {
+        id: 53,
+        class: "bicycle",
+        hazardType: "bicycle",
+        bbox: [270, 50, 100, 160], // center, h = 160/360 = 0.444 >= 0.40
+        history: [
+          { area: 0.04, timestamp: 0.0, cx: 0.50, cy: 0.5, h_frac: 0.25, bbox: [270, 50, 70, 90] },
+          { area: 0.13, timestamp: 0.4, cx: 0.50, cy: 0.5, h_frac: 0.444, bbox: [270, 50, 100, 160] },
+        ],
+        consecutiveFrames: 2,
+        lastSeenTimestamp: 0.4,
+      };
+
+      const bicycleRes = evaluateHazardDetails(fastBicycle, W, H);
+      expect(bicycleRes.alert).not.toBeNull();
+      expect(bicycleRes.alert!.type).toBe("bicycle");
+      expect(bicycleRes.alert!.urgency).toBe(3);
+      expect(buildPhrase(bicycleRes.alert, "en")).toBe("Bicycle ahead, stop");
+    });
+
+    it("suppresses fast-closing override when growth is below 0.20/s trigger (e.g. 0.07/s)", () => {
+      // Person at center with h=0.51, but growth is only 0.07/s (< 0.20/s trigger)
+      const slowGrowingNearPerson: TrackedObject = {
+        id: 54,
+        class: "person",
+        hazardType: "person",
+        bbox: [270, 46, 36, 184], // center, h=184/360 = 0.511 >= 0.40
+        history: [
+          { area: 0.05, timestamp: 0.0, cx: 0.50, cy: 0.5, h_frac: 0.45, bbox: [270, 50, 36, 162] },
+          { area: 0.078, timestamp: 0.4, cx: 0.50, cy: 0.5, h_frac: 0.511, bbox: [270, 46, 36, 184] },
+        ],
+        consecutiveFrames: 2,
+        lastSeenTimestamp: 0.4,
+      };
+
+      const res = evaluateHazardDetails(slowGrowingNearPerson, W, H);
+      // Growth rate is (0.078 - 0.05) / 0.4 = 0.07/s (< 0.20/s), deltaH = 0.061 (< 0.15)
+      // Fast-closing override must NOT fire!
+      expect(res.alert).toBeNull();
+      expect(res.decision).toBe("suppressed: not_tracked_long_enough");
+    });
+
+    it("requires at least 2 matched samples and suppresses when samples are separated by a gap (>0.55s)", () => {
+      // Sample 1 at t=0.4s, Sample 2 at t=1.2s (dt=0.8s across gap at t=0.8s)
+      const gapPerson: TrackedObject = {
+        id: 55,
+        class: "person",
+        hazardType: "person",
+        bbox: [270, 46, 36, 183], // center, h=183/360 = 0.508
+        history: [
+          { area: 0.01, timestamp: 0.4, cx: 0.50, cy: 0.5, h_frac: 0.114, bbox: [270, 50, 7, 21] },
+          { area: 0.065, timestamp: 1.2, cx: 0.50, cy: 0.5, h_frac: 0.508, bbox: [270, 46, 36, 183] },
+        ],
+        consecutiveFrames: 2,
+        lastSeenTimestamp: 1.2,
+      };
+
+      const res = evaluateHazardDetails(gapPerson, W, H);
+      // Because samples are 0.8s apart across a gap, fast-closing override MUST NOT fire!
+      expect(res.rule).not.toBe("fast_closing_override");
+    });
+  });
+
+  describe("Tracker identity gate", () => {
+    const W = 320;
+    const H = 180;
+
+    it("keeps track and fires fast_closing_override alert for real clip_001 vehicle sequence (t=11.2 to 11.6 s, 1.98x height, 3.7x area)", () => {
+      // Real vehicle detection from clip_001 frame 28 at t = 11.20s:
+      // bbox: [196.57, 52.26, 39.74, 60.02], h_frac = 60.02/180 = 0.333, area = 2385.2/57600 = 0.0414
+      const dets1: RawDetection[] = [
+        { bbox: [196.57, 52.26, 39.74, 60.02], class: "motorcycle", score: 0.79 },
+      ];
+      const step1 = updateTracker([], dets1, 11.20, W, H);
+      expect(step1.updatedTracks.length).toBe(1);
+      const vehicleTrackId = step1.updatedTracks[0]!.id;
+      expect(step1.updatedTracks[0]!.bbox[3] / H).toBeCloseTo(0.333, 2);
+      expect(step1.alerts.length).toBe(0);
+      expect(step1.decisions.length).toBe(1);
+      expect(step1.decisions[0]!.decision).toBe("suppressed: not_tracked_long_enough");
+
+      // Real vehicle detection from clip_001 frame 29 at t = 11.60s:
+      // bbox: [230.33, 53.50, 74.56, 118.78], h_frac = 118.78/180 = 0.660, area = 8856.2/57600 = 0.1538
+      // Height growth: 118.78 / 60.02 = 1.98x (<= 3.0x limit)
+      // Area growth: 8856.2 / 2385.2 = 3.71x (<= 9.0x limit)
+      const dets2: RawDetection[] = [
+        { bbox: [230.33, 53.50, 74.56, 118.78], class: "motorcycle", score: 0.72 },
+      ];
+      const step2 = updateTracker(step1.updatedTracks, dets2, 11.60, W, H);
+
+      // Track must be KEPT (not split into new track)
+      expect(step2.updatedTracks.length).toBe(1);
+      expect(step2.updatedTracks[0]!.id).toBe(vehicleTrackId);
+      expect(step2.updatedTracks[0]!.consecutiveFrames).toBe(2);
+      expect(step2.updatedTracks[0]!.lastSeenTimestamp).toBe(11.60);
+
+      // fast_closing_override alert MUST fire at 11.60s
+      expect(step2.alerts.length).toBe(1);
+      const alert = step2.alerts[0]!;
+      expect(alert.type).toBe("vehicle");
+      expect(alert.direction).toBe("right");
+      expect(alert.distance).toBe("near");
+      expect(alert.urgency).toBe(3);
+      expect(alert.ruleFired).toBe("fast_closing_override");
+      expect(alert.h_frac).toBeCloseTo(0.66, 2);
+      expect(step2.decisions.length).toBe(1);
+      expect(step2.decisions[0]!.decision).toBe("alerted");
+      expect(step2.decisions[0]!.reason).toContain("fast_closing_override");
+    });
+
+    it("rejects match when h_frac changes by >3.0x (or area by >9.0x) within 0.55s and starts new track (clip_001 0.606 -> 0.114 -> gap -> 0.507 sequence)", () => {
+      // Frame 1 at t = 0.0s: person with h_frac = 109/180 = 0.606
+      const frame1Dets: RawDetection[] = [
+        { bbox: [173, 41, 41, 109], class: "person", score: 0.9 },
+      ];
+      const step1 = updateTracker([], frame1Dets, 0.0, W, H);
+      expect(step1.updatedTracks.length).toBe(1);
+      const track1Id = step1.updatedTracks[0]!.id;
+      expect(step1.updatedTracks[0]!.bbox[3] / H).toBeCloseTo(0.606, 2);
+
+      // Frame 2 at t = 0.4s: person with h_frac = 21/180 = 0.117 ~ 0.114
+      // Height shrinkage: 109 / 21 = 5.19x > 3.0x limit
+      // Area shrinkage: 4469 / 147 = 30.4x > 9.0x limit
+      const frame2Dets: RawDetection[] = [
+        { bbox: [143, 59, 7, 21], class: "person", score: 0.9 },
+      ];
+      const step2 = updateTracker(step1.updatedTracks, frame2Dets, 0.4, W, H);
+
+      // Track 1 must NOT match the 0.114 detection (shrinkage 5.19x > 3.0x in height and 30.4x > 9.0x in area)
+      // Instead, a new track must be started for the 0.114 detection
+      expect(step2.updatedTracks.length).toBe(2);
+      const track1AfterStep2 = step2.updatedTracks.find((t) => t.id === track1Id)!;
+      expect(track1AfterStep2).toBeDefined();
+      expect(track1AfterStep2.lastSeenTimestamp).toBe(0.0); // un-matched, kept at previous timestamp
+      expect(track1AfterStep2.consecutiveFrames).toBe(1);
+
+      const track2 = step2.updatedTracks.find((t) => t.id !== track1Id)!;
+      expect(track2).toBeDefined();
+      expect(track2.lastSeenTimestamp).toBe(0.4);
+      expect(track2.consecutiveFrames).toBe(1);
+      expect(track2.bbox[3] / H).toBeCloseTo(0.117, 2);
+
+      // Frame 3 at t = 0.8s: gap (no detections)
+      const step3 = updateTracker(step2.updatedTracks, [], 0.8, W, H);
+      // Both tracks retained across gap
+      expect(step3.updatedTracks.length).toBe(2);
+
+      // Frame 4 at t = 1.2s: detection with h_frac = 91/180 = 0.506 ~ 0.507
+      const frame4Dets: RawDetection[] = [
+        { bbox: [173, 46, 36, 91], class: "person", score: 0.9 },
+      ];
+      const step4 = updateTracker(step3.updatedTracks, frame4Dets, 1.2, W, H);
+
+      // Track 1 gap is 1.2s > 1.0s, so Track 1 is dropped
+      expect(step4.updatedTracks.find((t) => t.id === track1Id)).toBeUndefined();
+
+      // No fast-closing override alert should fire
+      expect(step4.alerts.length).toBe(0);
+    });
+  });
 });

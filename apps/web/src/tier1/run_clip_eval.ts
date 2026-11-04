@@ -205,42 +205,37 @@ export async function runClipEval(clipName: string) {
     }
   }
 
-  // Add missed hazards for clip_006 if applicable (stairs & wall turns missed by Tier 1 COCO)
-  if (manifest.clip.includes("clip_006")) {
-    const missedStaticHazards = [
-      { t: 14.8, cls: "wall", dir: "center" as const, reason: "wall turn missed by Tier 1" },
-      { t: 21.2, cls: "stairs", dir: "center" as const, reason: "descending stairs missed by Tier 1" },
-      { t: 32.4, cls: "wall", dir: "center" as const, reason: "corridor wall turn missed by Tier 1" },
-    ];
-    for (const m of missedStaticHazards) {
-      allDecisions.push({
-        id: `${manifest.clip}_missed_${m.t.toFixed(2)}`,
-        clip: manifest.clip,
-        t: m.t,
-        sample_time: m.t,
-        trackId: -1,
-        class: m.cls as any,
-        direction: m.dir,
-        decision: "missed_hazard",
-        reason: m.reason,
-        label: "Should have alerted",
-      });
-    }
-  }
-
-  // Apply ground truth labeling:
-  for (const d of allDecisions) {
-    if (d.decision === "alerted") {
-      d.label = "True alert";
-    } else if (d.decision === "missed_hazard") {
-      d.label = "Should have alerted";
-    } else {
-      d.label = "Correct silence";
-    }
-  }
+  // Never create, infer or auto-assign labels. Unlabeled rows remain unlabeled ("")
+  // and are strictly excluded from TN, FP and precision calculations.
+  // Ground truth labels come exclusively from user-exported CSVs.
 
   // Compute summary metrics (Requirement 4)
   const summary = calculateDecisionSummary(allDecisions, manifest.duration);
+
+  // Check user labeled misses from user CSV if available
+  const userCsvs = [
+    path.join(repoRoot, "eval", `${manifest.clip.replace(".mp4", "")}_mp4_tier1_decisions.csv`),
+    path.join(repoRoot, "eval", `${manifest.clip.replace(".mp4", "")}_mp4_tier1_decisions_1793559223689.csv`),
+  ];
+  const userMisses: { t: number; class: string; direction: string }[] = [];
+  for (const p of userCsvs) {
+    if (fs.existsSync(p)) {
+      const lines = fs.readFileSync(p, "utf8").split(/\r?\n/).slice(1);
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        const parts = line.split(",");
+        const tVal = parseFloat(parts[3] ?? parts[2] ?? "0");
+        const cls = (parts[4] ?? "").replace(/"/g, "").trim();
+        const dir = (parts[5] ?? "").replace(/"/g, "").trim();
+        const dec = (parts[6] ?? "").replace(/"/g, "").trim();
+        if (dec === "missed_hazard") {
+          userMisses.push({ t: tVal, class: cls, direction: dir });
+        }
+      }
+    }
+  }
+
+  const alertedRows = allDecisions.filter((d) => d.decision === "alerted");
 
   console.log(`\n--- Results for ${manifest.clip} ---`);
   console.log(`Duration: ${manifest.duration.toFixed(2)}s`);
@@ -252,6 +247,41 @@ export async function runClipEval(clipName: string) {
   console.log(`Missed Hazards (FN): ${summary.missedHazards}`);
   console.log(`Precision: ${summary.precisionPercent} (${summary.precision.toFixed(3)})`);
   console.log(`Recall: ${summary.recallPercent} (${summary.recall.toFixed(3)})`);
+
+  console.log(`\nAlerts Fired (${alertedRows.length}):`);
+  if (alertedRows.length === 0) {
+    console.log("  (None)");
+  } else {
+    for (const a of alertedRows) {
+      console.log(`  t=${(a.sample_time ?? a.t).toFixed(2)}s | class=${a.class} | dir=${a.direction} | ${a.reason}`);
+    }
+  }
+
+  if (userMisses.length > 0) {
+    console.log(`\nUser Labeled Misses Status (${userMisses.length} misses):`);
+    for (const m of userMisses) {
+      const hit = alertedRows.find(
+        (a) =>
+          a.class === m.class &&
+          a.direction === m.direction &&
+          Math.abs((a.sample_time ?? a.t) - m.t) <= 1.5
+      );
+      if (hit) {
+        console.log(`  ✓ CAUGHT: ${m.class} on ${m.direction} at t=${m.t.toFixed(2)}s (Alert at t=${(hit.sample_time ?? hit.t).toFixed(2)}s)`);
+      } else {
+        console.log(`  ✗ STILL MISSED: ${m.class} on ${m.direction} at t=${m.t.toFixed(2)}s`);
+      }
+    }
+  }
+
+  console.log(`\nNew Alerts to Judge by User:`);
+  if (alertedRows.length === 0) {
+    console.log("  (None)");
+  } else {
+    for (const a of alertedRows) {
+      console.log(`  [UNLABELED] t=${(a.sample_time ?? a.t).toFixed(2)}s | ${a.class} | ${a.direction} | ${a.reason}`);
+    }
+  }
 
   // Export CSV
   const csvContent = formatDecisionsToCsv(allDecisions);

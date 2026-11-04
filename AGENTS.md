@@ -34,6 +34,8 @@ Judged on creativity, technical ambition, and whether it works. Deadline: Nov 4,
    word plus position.
 9. **Never report benchmark, accuracy or eval numbers that were not produced by running code on the stated device.**
    Label any estimate as an estimate.
+10.**Ground-truth labels come only from human-exported CSVs.** 
+Never auto-label, infer or fabricate labels or evaluation results.
 
 ## Architecture
 

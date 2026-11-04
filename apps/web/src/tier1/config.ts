@@ -45,6 +45,12 @@ export const DEFAULT_TIER1_CONFIG: Tier1Config = {
   minTrackDurationSec: 0.8,
   minClosingDurationSec: 0.6,
   staticMinTrackDurationSec: 0.4,
+  fastClosingTrackDurationSec: 0.4,
+  fastClosingMinHFrac: 0.40,
+  fastClosingDeltaHFrac: 0.15,
+  fastClosingGrowthRatePerSec: 0.20,
+  identityMaxHeightRatio: 3.0,
+  identityMaxAreaRatio: 9.0,
   perClassClosingThreshold: {
     person: 0.08,
     bicycle: 0.06,

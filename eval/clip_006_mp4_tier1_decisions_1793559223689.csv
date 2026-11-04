@@ -1,0 +1,6 @@
+id,clip,sample_time,t,class,direction,decision,reason,label
+"6.28_missed_other_center","clip_006.mp4",6.28,6.28,"other","center","missed_hazard","user labeled miss","Should have alerted"
+"15.90_missed_other_right","clip_006.mp4",15.90,15.90,"other","right","missed_hazard","user labeled miss","Should have alerted"
+"18.11_missed_stairs_center","clip_006.mp4",18.11,18.11,"stairs","center","missed_hazard","user labeled miss","Should have alerted"
+"34.61_missed_stairs_center","clip_006.mp4",34.61,34.61,"stairs","center","missed_hazard","user labeled miss","Should have alerted"
+
