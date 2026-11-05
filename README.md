@@ -9,6 +9,7 @@ emergency.
 Built for the **Meta Global AI Developer Hackathon** (Indie track, theme:
 *Build for Your World*).
 
+
 > [!IMPORTANT]
 > Drishti **complements** a cane or guide dog — it never replaces one.
 > It reports detections ("Vehicle on right, careful") and never claims a path
@@ -261,6 +262,37 @@ drishti/
   PROGRESS.md       Handoff log with measured results
   .env.example      Environment variable names
 ```
+
+## Future scope
+
+Drishti is a phone-based MVP. These are the planned next steps, in rough priority order.
+
+### Safety and reliability
+- **User testing first.** Test with blind and low-vision users and mobility-training organizations, and label a larger, more varied set of walking clips (night, rain, crowded markets) before trusting any number we report.
+- **Faster on-device detection.** Today's detector runs at about 2.5 FPS on a mid-range phone. We plan to try GPU-accelerated runtimes and a model trained for stairs, kerbs, drains and Indian road vehicles such as auto-rickshaws.
+- **Reliable recovery messages.** Announce clearly when vision is limited and when it returns, and test every failure path on real devices.
+- **Verified emergency alerts.** Complete and test the Telegram path end to end, send updated live location while an alert is active, and add WhatsApp through its business API.
+- **Fall detection** from phone sensors, always behind a spoken, cancelable countdown.
+
+### Meta stack
+- **Ray-Ban Meta glasses** through the Meta Wearables Device Access Toolkit: camera frames from the glasses and spoken guidance through their speakers, so the user's hands and phone stay free.
+- **SAM 3.1** to segment the walkable path and say which side has clear space, which could also support confirmed side-steps around obstacles.
+- **Muse Voice transcription** for hands-free commands in Hindi and English.
+- **More Muse Spark capabilities** for reading signs and describing the scene on request.
+
+### Guidance and personalization
+- **Turn-by-turn walking directions** to a spoken destination, combining the route with live hazard alerts.
+- **A user profile** (language, tone, verbosity, units in steps) with voice onboarding.
+- **Memory and search:** saved places, destination history and semantic search in Hindi and English.
+- **Place suggestions and nearby places** with ambience details such as entrance steps, noise and crowding. Nearby results depend on OpenStreetMap data, which can be incomplete.
+- **More languages**, starting with Bengali and other regional languages.
+
+### Platform
+- **A native Android app** so Drishti keeps working with the screen locked, and can use lock-screen triggers and automatic SMS permissions.
+- **Privacy by default:** on-device processing wherever possible, no frames stored, clear deletion controls and a plain-language data notice.
+
+Drishti is meant to complement a cane or guide dog, and never to replace one.
+---
 
 ## License
 
