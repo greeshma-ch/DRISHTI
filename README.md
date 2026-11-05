@@ -263,6 +263,8 @@ drishti/
   .env.example      Environment variable names
 ```
 
+---
+
 ## Future scope
 
 Drishti is a phone-based MVP. These are the planned next steps, in rough priority order.
