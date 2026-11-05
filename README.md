@@ -18,16 +18,30 @@ Built for the **Meta Global AI Developer Hackathon** (Indie track, theme:
 ---
 
 ## Two-Tier Design
-
 ```
-Phone camera → Client (React / Vite PWA)
-                 Tier 1: on-device COCO-SSD object detector (~200 ms)
-                 frame sampler, GPS + compass, push-to-talk, TTS
-            → Server (FastAPI)
-                 Tier 2: Meta Llama (Muse Spark) vision → structured hazard JSON
-                 nav service: geocode → foot route → spoken cue
-                 profile service, emergency service (Telegram + tel:112)
-            → Priority arbiter (client) → speech out
+flowchart LR
+    CAM["Phone camera<br/>chest strap or lanyard"] --> SAMPLER["Frame sampler"]
+
+    subgraph PHONE["On the phone"]
+        SAMPLER --> BLOCK["Camera-blocked check"]
+        SAMPLER --> T1["Tier 1: on-device detector<br/>COCO-SSD lite in a Web Worker<br/>about 330 ms per frame, about 2.5 FPS measured"]
+        T1 --> TRK["Tracker and rules<br/>direction, distance, closing speed"]
+        BLOCK --> ARB
+        TRK --> ARB
+        ARB["Priority arbiter<br/>P0 emergency, P1 hazard,<br/>P2 navigation, P3 advice"]
+        ARB --> SPEECH["Speech out<br/>fixed Hindi and English phrase table"]
+    end
+
+    subgraph SERVER["Server - FastAPI"]
+        GUARD["Circuit breaker<br/>rate limiter<br/>spend guard"]
+        PARSE["Parse and validate<br/>unknown types become other"]
+    end
+
+    SAMPLER -->|"JPEG 640x360, about 0.5 fps"| GUARD
+    GUARD --> META["Meta Muse Spark<br/>muse-spark-1.3, minimal reasoning<br/>about 2 to 5 s per frame measured"]
+    META --> PARSE
+    PARSE -->|"single most urgent hazard"| ARB
+    GUARD -.->|"degraded: Tier 1 keeps running"| ARB
 ```
 
 **Tier 1** runs a COCO-SSD `lite_mobilenet_v2` model entirely on-device in a
@@ -60,6 +74,16 @@ Every utterance is a message `{priority, text, ttl_ms, key}`.
 | P1 | Imminent hazard (urgency 2–3) | Interrupts P2 and P3 mid-sentence |
 | P2 | Navigation cue | Spoken at ~30 m and ~10 m; held while P1 is active |
 | P3 | Advisory, answers, chat | Only when nothing above is active |
+
+```
+flowchart TD
+    P3["P3 Advice or nearby places"] --> Q{"Arbiter"}
+    P2["P2 Navigation cue"] --> Q
+    P1["P1 Hazard alert or status message"] --> Q
+    P0["P0 Emergency"] --> Q
+    Q -->|"higher priority interrupts mid-sentence"| OUT["One utterance at a time"]
+
+```
 
 **Rules:** dedupe the same hazard type + direction for 4 s; at most one hazard
 utterance per 1.5 s; drop any message past its TTL (hazard TTL 2 s). "Vision
