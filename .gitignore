@@ -38,7 +38,8 @@ test-results/
 # Model and tool caches
 .cache/
 /models/
-!.apps/web/public/models
+!apps/web/public/models/
+!apps/web/public/wasm/
 
 # Logs and OS files
 *.log

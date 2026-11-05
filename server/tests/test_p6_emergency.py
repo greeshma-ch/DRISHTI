@@ -147,7 +147,7 @@ class TestEmergencyEndpoint:
 
         # Too many alerts - validator truncates to 3, so request is valid
         # but Telegram send fails (chat not found), so returns 200 with ok=false
-        with patch.dict(settings.__dict__, {"EMERGENCY_DRY_RUN": False}), patch(
+        with patch.object(settings, "EMERGENCY_DRY_RUN", False), patch(
             "server.emergency.send_telegram_message", new_callable=AsyncMock, return_value=False
         ):
             resp = client.post(
@@ -180,7 +180,7 @@ class TestEmergencyEndpoint:
 
     def test_emergency_dry_run_logs_only(self, valid_user, caplog):
         user_id, token = valid_user
-        with patch.dict("server.config.settings.__dict__", {"EMERGENCY_DRY_RUN": True}):
+        with patch.object(settings, "EMERGENCY_DRY_RUN", True):
             resp = client.post(
                 "/emergency",
                 json={
@@ -210,7 +210,7 @@ class TestEmergencyEndpoint:
 
     def test_emergency_rate_limit_10_per_hour_per_user(self, valid_user):
         user_id, token = valid_user
-        with patch.dict("server.config.settings.__dict__", {"EMERGENCY_DRY_RUN": True}):
+        with patch.object(settings, "EMERGENCY_DRY_RUN", True):
             for _ in range(10):
                 resp = client.post(
                     "/emergency",
@@ -240,7 +240,7 @@ class TestEmergencyEndpoint:
         other_id = generate_user_id()
         other_token = create_user_token(other_id)
 
-        with patch.dict("server.config.settings.__dict__", {"EMERGENCY_DRY_RUN": True}):
+        with patch.object(settings, "EMERGENCY_DRY_RUN", True):
             # Exhaust first user's limit
             for _ in range(10):
                 client.post(
@@ -257,7 +257,7 @@ class TestEmergencyEndpoint:
 
     def test_emergency_message_format(self, valid_user, caplog):
         user_id, token = valid_user
-        with patch.dict("server.config.settings.__dict__", {"EMERGENCY_DRY_RUN": True}):
+        with patch.object(settings, "EMERGENCY_DRY_RUN", True):
             resp = client.post(
                 "/emergency",
                 json={
@@ -293,7 +293,7 @@ class TestEmergencyEndpoint:
 
     def test_emergency_missing_location(self, valid_user, caplog):
         user_id, token = valid_user
-        with patch.dict("server.config.settings.__dict__", {"EMERGENCY_DRY_RUN": True}):
+        with patch.object(settings, "EMERGENCY_DRY_RUN", True):
             resp = client.post(
                 "/emergency",
                 json={
@@ -315,7 +315,7 @@ class TestEmergencyEndpoint:
 
     def test_emergency_alerts_truncated_to_3(self, valid_user, caplog):
         user_id, token = valid_user
-        with patch.dict("server.config.settings.__dict__", {"EMERGENCY_DRY_RUN": True}):
+        with patch.object(settings, "EMERGENCY_DRY_RUN", True):
             resp = client.post(
                 "/emergency",
                 json={
@@ -463,7 +463,7 @@ class TestHealthEndpoint:
 class TestBotTokenSecurity:
     def test_bot_token_not_in_client_response(self, valid_user):
         user_id, token = valid_user
-        with patch.dict("server.config.settings.__dict__", {"EMERGENCY_DRY_RUN": True}):
+        with patch.object(settings, "EMERGENCY_DRY_RUN", True):
             resp = client.post(
                 "/emergency",
                 json={"user_id": user_id, "token": token, "contacts": [1], "lang": "en"},
