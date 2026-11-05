@@ -291,7 +291,7 @@ Drishti is a phone-based MVP. These are the planned next steps, in rough priorit
 - **A native Android app** so Drishti keeps working with the screen locked, and can use lock-screen triggers and automatic SMS permissions.
 - **Privacy by default:** on-device processing wherever possible, no frames stored, clear deletion controls and a plain-language data notice.
 
-Drishti is meant to complement a cane or guide dog, and never to replace one.
+### Drishti is meant to complement a cane or guide dog, and never to replace one.
 ---
 
 ## License
