@@ -18,7 +18,7 @@ Built for the **Meta Global AI Developer Hackathon** (Indie track, theme:
 ---
 
 ## Two-Tier Design
-```
+```mermaid
 flowchart LR
     CAM["Phone camera<br/>chest strap or lanyard"] --> SAMPLER["Frame sampler"]
 
@@ -75,7 +75,7 @@ Every utterance is a message `{priority, text, ttl_ms, key}`.
 | P2 | Navigation cue | Spoken at ~30 m and ~10 m; held while P1 is active |
 | P3 | Advisory, answers, chat | Only when nothing above is active |
 
-```
+```mermaid
 flowchart TD
     P3["P3 Advice or nearby places"] --> Q{"Arbiter"}
     P2["P2 Navigation cue"] --> Q
